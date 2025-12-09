@@ -2,14 +2,12 @@
 # 注意：此文件主要用于数据库表结构定义和初始化
 # 日常数据库操作请使用 core.database.get_conn()
 # 已移除 SQLAlchemy ORM，完全使用 pymysql
-import logging
 import pymysql
-from core.config import get_db_config, PLATFORM_MERCHANT_ID, MEMBER_PRODUCT_PRICE, LOG_FILE
+from core.config import get_db_config, PLATFORM_MERCHANT_ID, MEMBER_PRODUCT_PRICE
+from core.logging import get_logger
 
-# 配置日志：统一输出到 logs/api.log
-# 注意：如果 finance_logic.py 已经配置了 basicConfig，这里不会重复配置
-# 使用 getLogger 获取 logger 实例，共享全局日志配置
-logger = logging.getLogger(__name__)
+# 使用统一的日志配置
+logger = get_logger(__name__)
 
 class DatabaseManager:
     def __init__(self):
@@ -46,9 +44,9 @@ class DatabaseManager:
                     email VARCHAR(100) UNIQUE,
                     phone VARCHAR(20),
                     member_level TINYINT NOT NULL DEFAULT 0,
-                    points BIGINT NOT NULL DEFAULT 0,
+                    points DECIMAL(12,4) NOT NULL DEFAULT 0.0000,
                     promotion_balance DECIMAL(14,2) NOT NULL DEFAULT 0.00,
-                    merchant_points BIGINT NOT NULL DEFAULT 0,
+                    merchant_points DECIMAL(12,4) NOT NULL DEFAULT 0.0000,
                     merchant_balance DECIMAL(14,2) NOT NULL DEFAULT 0.00,
                     status TINYINT NOT NULL DEFAULT 1,
                     level_changed_at DATETIME NULL,
@@ -98,7 +96,7 @@ class DatabaseManager:
                     merchant_id BIGINT UNSIGNED,
                     total_amount DECIMAL(12,2) NOT NULL,
                     original_amount DECIMAL(12,2) DEFAULT 0.00,
-                    points_discount DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+                    points_discount DECIMAL(12,4) NOT NULL DEFAULT 0.0000,
                     is_member_order TINYINT(1) NOT NULL DEFAULT 0,
                     is_vip_item TINYINT(1) DEFAULT 0 COMMENT '1=含会员商品（兼容订单系统）',
                     status VARCHAR(30) NOT NULL DEFAULT 'pending_pay',
@@ -164,8 +162,8 @@ class DatabaseManager:
                 CREATE TABLE IF NOT EXISTS points_log (
                     id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
                     user_id BIGINT UNSIGNED NOT NULL,
-                    change_amount BIGINT NOT NULL,
-                    balance_after BIGINT NOT NULL,
+                    change_amount DECIMAL(12,4) NOT NULL,
+                    balance_after DECIMAL(12,4) NOT NULL,
                     type ENUM('member','merchant') NOT NULL,
                     reason VARCHAR(255),
                     related_order BIGINT UNSIGNED,
@@ -203,7 +201,7 @@ class DatabaseManager:
                     id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
                     user_id BIGINT UNSIGNED NOT NULL,
                     coupon_type ENUM('user','merchant') NOT NULL,
-                    amount DECIMAL(14,2) NOT NULL,
+                    amount DECIMAL(14,4) NOT NULL,
                     status ENUM('unused','used','expired') NOT NULL DEFAULT 'unused',
                     valid_from DATE NOT NULL,
                     valid_to DATE NOT NULL,
@@ -245,9 +243,9 @@ class DatabaseManager:
                     id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
                     user_id BIGINT UNSIGNED NOT NULL,
                     week_start DATE NOT NULL,
-                    subsidy_amount DECIMAL(14,2) NOT NULL,
-                    points_before BIGINT NOT NULL,
-                    points_deducted BIGINT NOT NULL,
+                    subsidy_amount DECIMAL(14,4) NOT NULL,
+                    points_before DECIMAL(12,4) NOT NULL,
+                    points_deducted DECIMAL(12,4) NOT NULL,
                     coupon_id BIGINT UNSIGNED,
                     INDEX idx_user_week (user_id, week_start)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci

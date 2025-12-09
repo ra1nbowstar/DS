@@ -1,5 +1,4 @@
 # api/finance/routes.py - 财务系统 API 路由
-import logging
 import os
 from pathlib import Path
 from typing import Optional, Dict, Any, List
@@ -10,17 +9,18 @@ from fastapi import FastAPI, HTTPException, Depends, Query, Path, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
 
 from core.database import get_conn
+from core.logging import get_logger
 from database_setup import DatabaseManager
 from services.finance_service import FinanceService
 from core.exceptions import FinanceException, OrderException
-from core.config import PLATFORM_MERCHANT_ID, MEMBER_PRODUCT_PRICE, MAX_TEAM_LAYER, LOG_FILE
+from core.config import PLATFORM_MERCHANT_ID, MEMBER_PRODUCT_PRICE, MAX_TEAM_LAYER
 from models.schemas.finance import (
     ResponseModel, UserCreateRequest, ProductCreateRequest, OrderRequest,
     WithdrawalRequest, WithdrawalAuditRequest, RewardAuditRequest,
     CouponUseRequest, RefundRequest
 )
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # 创建财务系统的路由
 router = APIRouter()
@@ -308,7 +308,7 @@ async def submit_test_order(
         user_id: int = Query(..., gt=0, description="用户ID"),
         product_type: str = Query(..., pattern=r'^(member|normal)$', description="商品类型"),
         quantity: int = Query(1, ge=1, description="数量"),
-        points_to_use: int = Query(0, ge=0, description="使用积分数")
+        points_to_use: float = Query(0, ge=0, description="使用积分数，支持小数点后4位精度")
 ):
     try:
         is_member = 1 if product_type == "member" else 0

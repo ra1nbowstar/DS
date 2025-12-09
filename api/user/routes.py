@@ -1,7 +1,6 @@
 from fastapi import HTTPException, APIRouter, Request
 import uuid
 import datetime
-import logging
 
 from models.schemas.user import (
     SetStatusReq, AuthReq, AuthResp, UpdateProfileReq, SelfDeleteReq,
@@ -10,6 +9,7 @@ from models.schemas.user import (
 )
 
 from core.database import get_conn
+from core.logging import get_logger
 from services.user_service import UserService, UserStatus, verify_pwd, hash_pwd
 from services.address_service import AddressService
 from services.points_service import add_points
@@ -17,7 +17,7 @@ from services.reward_service import TeamRewardService
 from services.director_service import DirectorService
 from services.wechat_service import WechatService
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 def _err(msg: str):
@@ -465,6 +465,7 @@ def return_addr_get(mobile: str):
 @router.post("/points", summary="增减积分")
 def points(body: PointsReq):
     try:
+        from decimal import Decimal
         with get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT id FROM users WHERE mobile=%s", (body.mobile,))
@@ -472,7 +473,7 @@ def points(body: PointsReq):
                 if not row:
                     raise HTTPException(status_code=404, detail="用户不存在")
                 user_id = row["id"]
-        add_points(user_id, body.points_type, body.amount, body.reason)
+        add_points(user_id, body.points_type, Decimal(str(body.amount)), body.reason)
         return {"msg": "ok"}
     except ValueError as e:
         _err(str(e))

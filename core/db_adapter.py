@@ -1,6 +1,6 @@
 """
-数据库适配器 - 将 SQLAlchemy Session 接口适配为 pymysql 接口
-用于逐步迁移从 SQLAlchemy 到 pymysql
+数据库适配器 - 封装 PyMySQL 连接和游标操作
+提供统一的数据库操作接口，支持命名参数和便捷的结果访问
 """
 from contextlib import contextmanager
 from typing import Optional, Any, Dict, List
@@ -10,8 +10,8 @@ import pymysql
 
 class PyMySQLAdapter:
     """
-    pymysql 适配器，模拟 SQLAlchemy Session 的部分接口
-    用于简化从 SQLAlchemy 到 pymysql 的迁移
+    PyMySQL 数据库适配器
+    封装 PyMySQL 连接和事务管理，提供统一的数据库操作接口
     """
     
     def __init__(self):
@@ -41,7 +41,7 @@ class PyMySQLAdapter:
             params: 参数字典
         
         Returns:
-            结果对象（模拟 SQLAlchemy Result）
+            ResultProxy 对象，用于访问查询结果
         """
         if self._conn is None:
             self._conn = get_conn().__enter__()
@@ -57,7 +57,7 @@ class PyMySQLAdapter:
         return ResultProxy(self._cursor)
     
     def _convert_sql_params(self, sql: str, params: Dict[str, Any]) -> tuple:
-        """将 SQLAlchemy 的 :param 格式转换为 pymysql 的 %s 格式，并返回转换后的 SQL 和参数元组"""
+        """将命名参数格式 `:param` 转换为 PyMySQL 的 `%s` 格式，并返回转换后的 SQL 和参数元组"""
         result_sql = sql
         param_list = []
         # 按顺序替换参数
@@ -97,7 +97,7 @@ class PyMySQLAdapter:
 
 
 class ResultProxy:
-    """模拟 SQLAlchemy Result 对象"""
+    """数据库查询结果代理类，封装查询结果并提供便捷的访问方法"""
     
     def __init__(self, cursor: pymysql.cursors.DictCursor):
         self._cursor = cursor
@@ -131,7 +131,7 @@ class ResultProxy:
 
 
 class RowProxy:
-    """模拟 SQLAlchemy Row 对象，支持属性访问和字典访问"""
+    """数据库行数据代理类，支持属性访问和字典访问两种方式"""
     
     def __init__(self, row: Dict):
         self._row = row

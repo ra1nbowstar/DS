@@ -8,7 +8,11 @@ import pymysql
 from fastapi import FastAPI
 from core.middleware import setup_cors, setup_static_files
 from core.config import get_db_config
+from core.logging import setup_logging
 from database_setup import initialize_database
+
+# 配置日志（如果需要同时输出到控制台，可以设置 log_to_console=True）
+setup_logging(log_to_file=True, log_to_console=True)
 
 # 添加项目根目录到路径
 sys.path.insert(0, str(pathlib.Path(__file__).parent))

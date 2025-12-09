@@ -39,7 +39,7 @@ class OrderRequest(BaseModel):
     user_id: int = Field(..., gt=0)
     product_id: int = Field(..., gt=0)
     quantity: int = Field(1, ge=1, le=100)
-    points_to_use: int = Field(0, ge=0)
+    points_to_use: float = Field(0, ge=0, description="使用积分数，支持小数点后4位精度")
 
 
 class WithdrawalRequest(BaseModel):

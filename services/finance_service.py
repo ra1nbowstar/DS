@@ -10,32 +10,11 @@ from core.config import (
     LOG_FILE
 )
 from core.db_adapter import PyMySQLAdapter
+from core.exceptions import FinanceException, OrderException, InsufficientBalanceException
+from core.logging import get_logger
 
-# 配置日志：只输出到 logs/api.log，不输出到控制台
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(LOG_FILE, encoding='utf-8')
-    ],
-    force=True  # 强制重新配置，覆盖之前的配置
-)
-logger = logging.getLogger(__name__)
-
-class FinanceException(Exception):
-    pass
-
-class OrderException(FinanceException):
-    pass
-
-class InsufficientBalanceException(FinanceException):
-    def __init__(self, account: str, required: Decimal, available: Decimal):
-        super().__init__(
-            f"余额不足: {account} | 需要: ¥{required:.2f} | 当前: ¥{available:.2f}"
-        )
-        self.account = account
-        self.required = required
-        self.available = available
+# 使用统一的日志配置
+logger = get_logger(__name__)
 
 class FinanceService:
     def __init__(self, session: Optional[PyMySQLAdapter] = None):
@@ -83,7 +62,7 @@ class FinanceService:
         row = result.fetchone()
         return Decimal(str(getattr(row, balance_type, 0))) if row else Decimal('0')
 
-    def settle_order(self, order_no: str, user_id: int, product_id: int, quantity: int = 1, points_to_use: int = 0) -> int:
+    def settle_order(self, order_no: str, user_id: int, product_id: int, quantity: int = 1, points_to_use: Decimal = Decimal('0')) -> int:
         logger.info(f"\n🛒 订单结算开始: {order_no}")
         try:
             with self.session.begin():
@@ -121,11 +100,11 @@ class FinanceService:
                 points_discount = Decimal('0')
                 final_amount = original_amount
 
-                if not product.is_member_product and points_to_use > 0:
+                if not product.is_member_product and points_to_use > Decimal('0'):
                     self._apply_points_discount(user_id, user, points_to_use, original_amount)
-                    points_discount = Decimal(points_to_use) * POINTS_DISCOUNT_RATE
+                    points_discount = points_to_use * POINTS_DISCOUNT_RATE
                     final_amount = original_amount - points_discount
-                    logger.info(f"💳 积分抵扣: {points_to_use}分 = ¥{points_discount}")
+                    logger.info(f"💳 积分抵扣: {points_to_use:.4f}分 = ¥{points_discount:.4f}")
 
                 order_id = self._create_order(
                     order_no, user_id, merchant_id, product_id,
@@ -143,13 +122,14 @@ class FinanceService:
             logger.error(f"订单结算失败: {e}")
             raise
 
-    def _apply_points_discount(self, user_id: int, user, points_to_use: int, amount: Decimal) -> None:
-        if user.points < points_to_use:
-            raise OrderException(f"积分不足，当前{user.points}分")
+    def _apply_points_discount(self, user_id: int, user, points_to_use: Decimal, amount: Decimal) -> None:
+        user_points = Decimal(str(user.points))
+        if user_points < points_to_use:
+            raise OrderException(f"积分不足，当前{user_points:.4f}分")
 
-        max_discount = amount * Decimal('0.5')
-        if points_to_use > max_discount:
-            raise OrderException(f"积分抵扣不能超过订单金额的50%（最多{int(max_discount)}分）")
+        max_discount_points = amount * Decimal('0.5') / POINTS_DISCOUNT_RATE
+        if points_to_use > max_discount_points:
+            raise OrderException(f"积分抵扣不能超过订单金额的50%（最多{max_discount_points:.4f}分）")
 
         self.session.execute(
             "UPDATE users SET points = points - %s WHERE id = %s",
@@ -199,29 +179,21 @@ class FinanceService:
             {"level": new_level, "user_id": user_id}
         )
 
-        points_earned = int(unit_price * quantity)
-        self.session.execute(
-            "UPDATE users SET points = points + %s WHERE id = %s",
-            {"points": points_earned, "user_id": user_id}
-        )
-        result = self.session.execute(
-            "SELECT points FROM users WHERE id = %s",
-            {"user_id": user_id}
-        )
-        new_points = result.fetchone().points
+        points_earned = unit_price * quantity
+        new_points_dec = self._update_user_balance(user_id, 'points', points_earned)
         # 使用 helper 插入 points_log
         self._insert_points_log(user_id=user_id,
                                 change_amount=points_earned,
-                                balance_after=new_points,
+                                balance_after=new_points_dec,
                                 type='member',
                                 reason='购买会员商品获得积分',
                                 related_order=order_id)
-        logger.info(f"🎉 用户升级: {old_level}星 → {new_level}星, 获得积分: {points_earned}")
+        logger.info(f"🎉 用户升级: {old_level}星 → {new_level}星, 获得积分: {points_earned:.4f}")
 
         self._create_pending_rewards(order_id, user_id, old_level, new_level)
 
-        company_points = int(total_amount * Decimal('0.20'))
-        self._add_pool_balance('company_points', Decimal(company_points), f"订单#{order_id} 公司积分分配")
+        company_points = total_amount * Decimal('0.20')
+        self._add_pool_balance('company_points', company_points, f"订单#{order_id} 公司积分分配")
 
     def _allocate_funds_to_pools(self, order_id: int, total_amount: Decimal) -> None:
         platform_revenue = total_amount * Decimal('0.80')
@@ -323,30 +295,28 @@ class FinanceService:
                     logger.info(f"🎗️ 公益基金获得: ¥{alloc_amount}")
 
         if member_level >= 1:
-            points_earned = int(final_amount)
+            points_earned = final_amount
             # 使用 helper 更新用户积分并返回新积分
-            new_points_dec = self._update_user_balance(user_id, 'points', Decimal(points_earned))
-            new_points = int(new_points_dec)
+            new_points_dec = self._update_user_balance(user_id, 'points', points_earned)
             self._insert_points_log(user_id=user_id,
                                     change_amount=points_earned,
-                                    balance_after=new_points,
+                                    balance_after=new_points_dec,
                                     type='member',
                                     reason='购买获得积分',
                                     related_order=order_id)
-            logger.info(f"💎 用户获得积分: {points_earned}")
+            logger.info(f"💎 用户获得积分: {points_earned:.4f}")
 
         if merchant_id != PLATFORM_MERCHANT_ID:
-            merchant_points = int(final_amount * Decimal('0.20'))
-            if merchant_points > 0:
-                new_mp_dec = self._update_user_balance(merchant_id, 'merchant_points', Decimal(merchant_points))
-                new_merchant_points = int(new_mp_dec)
+            merchant_points = final_amount * Decimal('0.20')
+            if merchant_points > Decimal('0'):
+                new_mp_dec = self._update_user_balance(merchant_id, 'merchant_points', merchant_points)
                 self._insert_points_log(user_id=merchant_id,
                                         change_amount=merchant_points,
-                                        balance_after=new_merchant_points,
+                                        balance_after=new_mp_dec,
                                         type='merchant',
                                         reason='销售获得积分',
                                         related_order=order_id)
-                logger.info(f"💎 商家获得积分: {merchant_points}")
+                logger.info(f"💎 商家获得积分: {merchant_points:.4f}")
 
     def audit_and_distribute_rewards(self, reward_ids: List[int], approve: bool, auditor: str = 'admin') -> bool:
         try:
@@ -484,7 +454,7 @@ class FinanceService:
                             {"amount": reward.reward_amount, "user_id": reward.user_id}
                         )
 
-                    user_points = int(order.original_amount)
+                    user_points = Decimal(str(order.original_amount))
                     self.session.execute(
                         "UPDATE users SET points = GREATEST(points - %s, 0) WHERE id = %s",
                         {"points": user_points, "user_id": user_id}
@@ -564,9 +534,9 @@ class FinanceService:
                 for user in users:
                     user_points = Decimal(str(user.points))
                     subsidy_amount = user_points * points_value
-                    deduct_points = int(subsidy_amount)
+                    deduct_points = subsidy_amount / points_value if points_value > 0 else Decimal('0')
 
-                    if subsidy_amount <= 0:
+                    if subsidy_amount <= Decimal('0'):
                         continue
 
                     result = self.session.execute(
@@ -581,9 +551,10 @@ class FinanceService:
                     )
                     coupon_id = result.lastrowid
 
+                    new_points = user_points - deduct_points
                     self.session.execute(
-                        "UPDATE users SET points = points - %s WHERE id = %s",
-                        {"points": deduct_points, "user_id": user.id}
+                        "UPDATE users SET points = %s WHERE id = %s",
+                        {"points": new_points, "user_id": user.id}
                     )
 
                     self.session.execute(
@@ -593,14 +564,14 @@ class FinanceService:
                             "user_id": user.id,
                             "week_start": today,
                             "subsidy_amount": subsidy_amount,
-                            "points_before": user.points,
+                            "points_before": user_points,
                             "points_deducted": deduct_points,
                             "coupon_id": coupon_id
                         }
                     )
 
                     total_distributed += subsidy_amount
-                    logger.info(f"用户{user.id}: 优惠券¥{subsidy_amount:.2f}, 扣积分{deduct_points}")
+                    logger.info(f"用户{user.id}: 优惠券¥{subsidy_amount:.4f}, 扣积分{deduct_points:.4f}")
 
                 result = self.session.execute("SELECT id, merchant_points FROM users WHERE merchant_points > 0")
                 merchants = result.fetchall()
@@ -608,10 +579,28 @@ class FinanceService:
                 for merchant in merchants:
                     merchant_points = Decimal(str(merchant.merchant_points))
                     subsidy_amount = merchant_points * points_value
-                    deduct_points = int(subsidy_amount)
+                    deduct_points = subsidy_amount / points_value if points_value > 0 else Decimal('0')
 
-                    if subsidy_amount <= 0:
+                    if subsidy_amount <= Decimal('0'):
                         continue
+
+                    result = self.session.execute(
+                        """INSERT INTO coupons (user_id, coupon_type, amount, valid_from, valid_to, status)
+                           VALUES (%s, 'merchant', %s, %s, %s, 'unused')""",
+                        {
+                            "user_id": merchant.id,
+                            "amount": subsidy_amount,
+                            "valid_from": today,
+                            "valid_to": valid_to
+                        }
+                    )
+                    coupon_id = result.lastrowid
+
+                    new_points = merchant_points - deduct_points
+                    self.session.execute(
+                        "UPDATE users SET merchant_points = %s WHERE id = %s",
+                        {"points": new_points, "user_id": merchant.id}
+                    )
 
                     self.session.execute(
                         """INSERT INTO weekly_subsidy_records (user_id, week_start, subsidy_amount, points_before, points_deducted, coupon_id)
@@ -620,18 +609,18 @@ class FinanceService:
                             "user_id": merchant.id,
                             "week_start": today,
                             "subsidy_amount": subsidy_amount,
-                            "points_before": merchant.merchant_points,
+                            "points_before": merchant_points,
                             "points_deducted": deduct_points,
                             "coupon_id": coupon_id
                         }
                     )
 
                     total_distributed += subsidy_amount
-                    logger.info(f"商家{merchant.id}: 优惠券¥{subsidy_amount:.2f}, 扣积分{deduct_points}")
+                    logger.info(f"商家{merchant.id}: 优惠券¥{subsidy_amount:.4f}, 扣积分{deduct_points:.4f}")
 
                 logger.info(f"ℹ️ 公司积分{company_points}未扣除，未发放优惠券")
 
-            logger.info(f"✅ 周补贴完成: 发放¥{total_distributed:.2f}优惠券（补贴池余额不变: ¥{pool_balance}，公司积分不扣除）")
+            logger.info(f"✅ 周补贴完成: 发放¥{total_distributed:.4f}优惠券（补贴池余额不变: ¥{pool_balance}，公司积分不扣除）")
             return True
         except Exception as e:
             logger.error(f"❌ 周补贴发放失败: {e}")
@@ -805,8 +794,8 @@ class FinanceService:
                                    remark=remark)
         return balance_after
 
-    def _insert_points_log(self, user_id: int, change_amount: int, balance_after: int, type: str, reason: str, related_order: Optional[int] = None) -> None:
-        """插入 `points_log` 记录。change_amount 使用整数（分/积分）。"""
+    def _insert_points_log(self, user_id: int, change_amount: Decimal, balance_after: Decimal, type: str, reason: str, related_order: Optional[int] = None) -> None:
+        """插入 `points_log` 记录。change_amount 和 balance_after 使用 Decimal 类型，支持小数点后4位精度。"""
         self.session.execute(
             """INSERT INTO points_log (user_id, change_amount, balance_after, points_type, reason, related_order, created_at)
                VALUES (%s, %s, %s, %s, %s, %s, NOW())""",
@@ -1069,7 +1058,7 @@ class FinanceService:
             "status": user.status,
             "coupons": {
                 "unused_count": coupons.count or 0,
-                "total_amount": float(coupons.total_amount or 0)
+                "total_amount": float(Decimal(str(coupons.total_amount or 0)))
             }
         }
 
@@ -1085,7 +1074,7 @@ class FinanceService:
         return [{
             "id": c.id,
             "coupon_type": c.coupon_type,
-            "amount": float(c.amount),
+            "amount": float(Decimal(str(c.amount))),
             "status": c.status,
             "valid_from": c.valid_from.strftime("%Y-%m-%d"),
             "valid_to": c.valid_to.strftime("%Y-%m-%d"),
@@ -1122,11 +1111,11 @@ class FinanceService:
 
         return {
             "user_assets": {
-                "total_points": int(user.points or 0),
+                "total_points": float(Decimal(str(user.points or 0))),
                 "total_balance": float(user.balance or 0)
             },
             "merchant_assets": {
-                "total_points": int(merchant.points or 0),
+                "total_points": float(Decimal(str(merchant.points or 0))),
                 "total_balance": float(merchant.balance or 0)
             },
             "platform_pools": platform_pools,
@@ -1139,7 +1128,7 @@ class FinanceService:
             },
             "coupons_summary": {
                 "unused_count": coupons.count or 0,
-                "total_amount": float(coupons.total_amount or 0),
+                "total_amount": float(Decimal(str(coupons.total_amount or 0))),
                 "remark": "周补贴改为发放优惠券"
             }
         }
@@ -1181,8 +1170,8 @@ class FinanceService:
         return [{
             "id": f.id,
             "user_id": f.user_id,
-            "change_amount": f.change_amount,
-            "balance_after": f.balance_after,
+            "change_amount": float(Decimal(str(f.change_amount))),
+            "balance_after": float(Decimal(str(f.balance_after))),
             "type": f.type,
             "reason": f.reason,
             "related_order": f.related_order,
@@ -1230,7 +1219,7 @@ class FinanceService:
         return {
             "summary": {
                 "total_orders": summary.total_orders or 0,
-                "total_points_used": int(summary.total_points or 0),
+                "total_points_used": float(Decimal(str(summary.total_points or 0))),
                 "total_discount_amount": float(summary.total_discount_amount or 0)
             },
             "pagination": {
@@ -1248,7 +1237,7 @@ class FinanceService:
                 "original_amount": float(r.original_amount),
                 "points_discount": float(r.points_discount),
                 "total_amount": float(r.total_amount),
-                "points_used": int(r.points_used),
+                "points_used": float(Decimal(str(r.points_used or 0))),
                 "created_at": r.created_at.strftime("%Y-%m-%d %H:%M:%S")
             } for r in records]
         }
