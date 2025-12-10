@@ -44,20 +44,56 @@ class UserService:
                     raise ValueError("手机号已注册")
                 pwd_hash = hash_pwd(pwd)
 
-                # 1. 生成唯一推荐码
-                code = _generate_code()
-                cur.execute("SELECT 1 FROM users WHERE referral_code=%s", (code,))
-                while cur.fetchone():
+                # 获取 users 表的可用字段，动态构建插入语句以兼容老表结构
+                cur.execute("SHOW COLUMNS FROM users")
+                cols = [r["Field"] for r in cur.fetchall()]
+
+                desired = [
+                    "mobile", "password_hash", "name",
+                    "member_points", "merchant_points", "withdrawable_balance",
+                    "status", "referral_code"
+                ]
+                insert_cols = [c for c in desired if c in cols]
+
+                # 必需字段检查
+                if "mobile" not in insert_cols or "password_hash" not in insert_cols:
+                    raise RuntimeError("数据库 users 表缺少必要字段，请检查表结构")
+
+                # 如果支持 referral_code，则生成唯一推荐码
+                code = None
+                if "referral_code" in insert_cols:
                     code = _generate_code()
                     cur.execute("SELECT 1 FROM users WHERE referral_code=%s", (code,))
+                    while cur.fetchone():
+                        code = _generate_code()
+                        cur.execute("SELECT 1 FROM users WHERE referral_code=%s", (code,))
 
-                # 2. 插入用户（只多了 referral_code 字段 & 参数）
-                cur.execute(
-                    "INSERT INTO users(mobile, password_hash, name, member_points, merchant_points, withdrawable_balance, status, referral_code) "
-                    "VALUES (%s,%s,%s,0,0,0,%s,%s)",
-                    (mobile, pwd_hash, name, int(UserStatus.NORMAL), code)  # ← 这里把 code 写进库
-                )
+                # 为每个插入列准备对应的值
+                vals = []
+                for col in insert_cols:
+                    if col == "mobile":
+                        vals.append(mobile)
+                    elif col == "password_hash":
+                        vals.append(pwd_hash)
+                    elif col == "name":
+                        vals.append(name)
+                    elif col in ("member_points", "merchant_points"):
+                        vals.append(0)
+                    elif col == "withdrawable_balance":
+                        vals.append(0)
+                    elif col == "status":
+                        vals.append(int(UserStatus.NORMAL))
+                    elif col == "referral_code":
+                        vals.append(code)
+                    else:
+                        vals.append(None)
+
+                cols_sql = ",".join(insert_cols)
+                placeholders = ",".join(["%s"] * len(insert_cols))
+                sql = f"INSERT INTO users({cols_sql}) VALUES ({placeholders})"
+                cur.execute(sql, tuple(vals))
                 uid = cur.lastrowid
+                conn.commit()
 
                 # 3. 绑定推荐人（原逻辑不变）
                 if referrer_mobile:
