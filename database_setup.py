@@ -46,15 +46,21 @@ class DatabaseManager:
                     member_level TINYINT NOT NULL DEFAULT 0,
                     points DECIMAL(12,4) NOT NULL DEFAULT 0.0000,
                     promotion_balance DECIMAL(14,2) NOT NULL DEFAULT 0.00,
+                    member_points DECIMAL(12,4) NOT NULL DEFAULT 0.0000,
                     merchant_points DECIMAL(12,4) NOT NULL DEFAULT 0.0000,
                     merchant_balance DECIMAL(14,2) NOT NULL DEFAULT 0.00,
                     status TINYINT NOT NULL DEFAULT 1,
                     level_changed_at DATETIME NULL,
+                    referral_id BIGINT UNSIGNED NULL COMMENT '推荐人id',
+                    referral_code BIGINT UNSIGNED NULL COMMENT '推荐码',
+                    withdrawable_balance BIGINT NOT NULL DEFAULT 0 COMMENT '可提现余额',
+                    avatar_path VARCHAR(255) NULL DEFAULT NULL COMMENT '头像路径',
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                     INDEX idx_mobile (mobile),
                     INDEX idx_email (email),
-                    INDEX idx_member_level (member_level)
+                    INDEX idx_member_level (member_level),
+                    UNIQUE KEY uk_referral_code (referral_code)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             """,
             'products': """
@@ -250,18 +256,6 @@ class DatabaseManager:
                     INDEX idx_user_week (user_id, week_start)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             """,
-            'director_dividends': """
-                CREATE TABLE IF NOT EXISTS director_dividends (
-                    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-                    user_id BIGINT UNSIGNED NOT NULL,
-                    period_date DATE NOT NULL,
-                    dividend_amount DECIMAL(14,2) NOT NULL DEFAULT 0.00,
-                    status VARCHAR(30) NOT NULL DEFAULT 'pending',
-                    paid_at DATETIME DEFAULT NULL,
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    INDEX idx_user_id (user_id)
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-            """,
             # ========== 订单系统相关表（来自 order/database_setup1.py） ==========
             'merchants': """
                 CREATE TABLE IF NOT EXISTS merchants (
@@ -327,6 +321,7 @@ class DatabaseManager:
                     lng DECIMAL(10,6) NULL,
                     lat DECIMAL(10,6) NULL,
                     is_default TINYINT(1) DEFAULT 0,
+                    addr_type ENUM('shipping','return') NOT NULL DEFAULT 'shipping' COMMENT '地址类型（分为购物地址和退货地址）',
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                     INDEX idx_user (user_id)
@@ -364,6 +359,57 @@ class DatabaseManager:
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             """,
+            'banner': """
+                CREATE TABLE IF NOT EXISTS banner (
+                    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                    product_id BIGINT UNSIGNED NOT NULL COMMENT '外键→products.id',
+                    image_url VARCHAR(500) NOT NULL COMMENT '图片URL',
+                    link_url VARCHAR(500) NULL COMMENT '跳转链接',
+                    sort_order INT NULL COMMENT '排序值',
+                    status INT NULL DEFAULT 1 COMMENT '状态（0隐藏/1显示）',
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+                    INDEX idx_product_id (product_id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            """,
+            'product_attributes': """
+                CREATE TABLE IF NOT EXISTS product_attributes (
+                    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                    product_id BIGINT UNSIGNED NOT NULL COMMENT '外键→products.id',
+                    name VARCHAR(100) NOT NULL COMMENT '属性名',
+                    value VARCHAR(100) NOT NULL COMMENT '属性值',
+                    INDEX idx_product_id (product_id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            """,
+            'product_skus': """
+                CREATE TABLE IF NOT EXISTS product_skus (
+                    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                    product_id BIGINT UNSIGNED NOT NULL COMMENT '外键→products.id',
+                    sku_code VARCHAR(64) NOT NULL UNIQUE COMMENT '唯一SKU编码',
+                    price DECIMAL(12,2) NULL COMMENT '售价',
+                    stock INT NULL DEFAULT 0 COMMENT '库存数量',
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+                    INDEX idx_product_id (product_id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            """,
+            'merchant_balance_income': """
+                CREATE TABLE IF NOT EXISTS merchant_balance_income (
+                    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                    merchant_id BIGINT UNSIGNED NOT NULL COMMENT '商户id',
+                    amount DECIMAL(10,2) NOT NULL COMMENT '金额',
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+                    INDEX idx_merchant_id (merchant_id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            """,
+            'merchant_withdraw': """
+                CREATE TABLE IF NOT EXISTS merchant_withdraw (
+                    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                    merchant_id BIGINT UNSIGNED NOT NULL COMMENT '商户id',
+                    amount DECIMAL(10,2) NOT NULL COMMENT '金额',
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+                    INDEX idx_merchant_id (merchant_id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            """,
         }
 
         for table_name, sql in tables.items():
@@ -377,6 +423,9 @@ class DatabaseManager:
         self._add_order_items_foreign_keys(cursor)
         self._add_user_addresses_foreign_keys(cursor)
         self._add_merchant_balance_foreign_keys(cursor)
+        self._add_banner_foreign_keys(cursor)
+        self._add_product_attributes_foreign_keys(cursor)
+        self._add_product_skus_foreign_keys(cursor)
 
         self._init_finance_accounts(cursor)
         logger.info("✅ 所有表结构初始化完成")
@@ -584,6 +633,72 @@ class DatabaseManager:
                 logger.info("✅ merchant_balance 表外键约束 merchant_balance_ibfk_1 已添加")
         except Exception as e:
             logger.warning(f"⚠️ merchant_balance 表外键约束添加失败（可忽略）: {e}")
+
+    def _add_banner_foreign_keys(self, cursor):
+        """为 banner 表添加外键约束（如果不存在）"""
+        try:
+            cursor.execute("""
+                SELECT CONSTRAINT_NAME 
+                FROM information_schema.TABLE_CONSTRAINTS 
+                WHERE TABLE_SCHEMA = DATABASE() 
+                AND TABLE_NAME = 'banner' 
+                AND CONSTRAINT_TYPE = 'FOREIGN KEY'
+            """)
+            existing_fks = [row['CONSTRAINT_NAME'] for row in cursor.fetchall()]
+            
+            if 'banner_ibfk_1' not in existing_fks:
+                cursor.execute("""
+                    ALTER TABLE banner 
+                    ADD CONSTRAINT banner_ibfk_1 
+                    FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
+                """)
+                logger.info("✅ banner 表外键约束 banner_ibfk_1 已添加")
+        except Exception as e:
+            logger.debug(f"⚠️ banner 表外键约束添加失败（已忽略）: {e}")
+
+    def _add_product_attributes_foreign_keys(self, cursor):
+        """为 product_attributes 表添加外键约束（如果不存在）"""
+        try:
+            cursor.execute("""
+                SELECT CONSTRAINT_NAME 
+                FROM information_schema.TABLE_CONSTRAINTS 
+                WHERE TABLE_SCHEMA = DATABASE() 
+                AND TABLE_NAME = 'product_attributes' 
+                AND CONSTRAINT_TYPE = 'FOREIGN KEY'
+            """)
+            existing_fks = [row['CONSTRAINT_NAME'] for row in cursor.fetchall()]
+            
+            if 'product_attributes_ibfk_1' not in existing_fks:
+                cursor.execute("""
+                    ALTER TABLE product_attributes 
+                    ADD CONSTRAINT product_attributes_ibfk_1 
+                    FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
+                """)
+                logger.info("✅ product_attributes 表外键约束 product_attributes_ibfk_1 已添加")
+        except Exception as e:
+            logger.debug(f"⚠️ product_attributes 表外键约束添加失败（已忽略）: {e}")
+
+    def _add_product_skus_foreign_keys(self, cursor):
+        """为 product_skus 表添加外键约束（如果不存在）"""
+        try:
+            cursor.execute("""
+                SELECT CONSTRAINT_NAME 
+                FROM information_schema.TABLE_CONSTRAINTS 
+                WHERE TABLE_SCHEMA = DATABASE() 
+                AND TABLE_NAME = 'product_skus' 
+                AND CONSTRAINT_TYPE = 'FOREIGN KEY'
+            """)
+            existing_fks = [row['CONSTRAINT_NAME'] for row in cursor.fetchall()]
+            
+            if 'product_skus_ibfk_1' not in existing_fks:
+                cursor.execute("""
+                    ALTER TABLE product_skus 
+                    ADD CONSTRAINT product_skus_ibfk_1 
+                    FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
+                """)
+                logger.info("✅ product_skus 表外键约束 product_skus_ibfk_1 已添加")
+        except Exception as e:
+            logger.debug(f"⚠️ product_skus 表外键约束添加失败（已忽略）: {e}")
 
     def _init_finance_accounts(self, cursor):
         accounts = [
