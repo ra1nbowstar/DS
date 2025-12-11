@@ -55,7 +55,7 @@ async def init_database(db_manager: DatabaseManager = Depends(get_database_manag
         raise HTTPException(status_code=500, detail=f"初始化失败: {e}")
 
 
-@router.post("/api/init-data", response_model=ResponseModel, summary="创建测试数据")
+"""@router.post("/api/init-data", response_model=ResponseModel, summary="创建测试数据")
 async def create_test_data(db_manager: DatabaseManager = Depends(get_database_manager)):
     try:
         from core.database import get_conn
@@ -94,10 +94,10 @@ async def create_user(
         return ResponseModel(success=True, message="用户创建成功", data={"user_id": user_id})
     except Exception as e:
         logger.error(f"创建用户失败: {e}")
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e))"""
 
 
-@router.get("/api/users/{user_id}", response_model=ResponseModel, summary="查询用户信息")
+"""@router.get("/api/users/{user_id}", response_model=ResponseModel, summary="查询用户信息")
 async def get_user_info(
         user_id: int,
         service: FinanceService = Depends(get_finance_service)
@@ -157,7 +157,7 @@ async def get_user_team(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/finance/products")
+@router.post("/api/products", response_model=ResponseModel, summary="创建商品")
 async def create_product(
         product: ProductCreateRequest,
         service: FinanceService = Depends(get_finance_service)
@@ -185,8 +185,8 @@ async def create_product(
         with get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """INSERT INTO products (sku, name, price, stock, is_member_product, merchant_id, status)
-                       VALUES (%s, %s, %s, %s, %s, %s, 1)""",
+                    """"""INSERT INTO products (sku, name, price, stock, is_member_product, merchant_id, status)
+                       VALUES (%s, %s, %s, %s, %s, %s, 1)""","""
                     (sku, product.name, final_price, product.stock, product.is_member_product, product.merchant_id)
                 )
                 product_id = cur.lastrowid
@@ -199,7 +199,7 @@ async def create_product(
         raise HTTPException(status_code=400, detail=f"创建失败: {e}")
 
 
-@router.get("/api/finance/products", response_model=ResponseModel, summary="财务-查询商品列表")
+@router.get("/api/products", response_model=ResponseModel, summary="查询商品列表")
 async def get_products(
         service: FinanceService = Depends(get_finance_service),
         is_member: Optional[int] = Query(None, ge=0, le=1)
@@ -229,7 +229,7 @@ async def get_products(
         })
     except Exception as e:
         logger.error(f"查询商品失败: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e))"""
 
 
 @router.post("/api/orders", response_model=ResponseModel, summary="订单结算")
