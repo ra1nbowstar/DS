@@ -79,6 +79,6 @@ def list_addresses(user_id: int):
 def set_default(addr_id: int, user_id: int):
     return {"ok": AddressManager.set_default(addr_id, user_id)}
 
-@router.delete("/{addr_id}", summary="删除收货地址")
+@router.delete("/{addr_id}", summary="删除收货地址", operation_id="order_delete_addr")
 def delete_addr(addr_id: int, user_id: int):
     return {"ok": AddressManager.delete(addr_id, user_id)}

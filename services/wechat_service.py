@@ -48,12 +48,29 @@ class WechatService:
 
         with get_conn() as conn:
             with conn.cursor() as cur:
-                # 唯一推荐码
-                code = _generate_code()
-                cur.execute("SELECT 1 FROM users WHERE referral_code=%s", (code,))
-                while cur.fetchone():
+                # 获取 users 表字段，动态构建插入语句以兼容老表
+                cur.execute("SHOW COLUMNS FROM users")
+                cols = [r["Field"] for r in cur.fetchall()]
+
+                desired = [
+                    "openid", "mobile", "password_hash", "name",
+                    "member_points", "merchant_points", "withdrawable_balance",
+                    "status", "referral_code"
+                ]
+                insert_cols = [c for c in desired if c in cols]
+
+                # 确保 mobile/password_hash 存在
+                if "mobile" not in insert_cols or "password_hash" not in insert_cols:
+                    raise RuntimeError("数据库 users 表缺少必要字段，请检查表结构")
+
+                # 如果支持 referral_code，则生成唯一推荐码
+                code = None
+                if "referral_code" in insert_cols:
                     code = _generate_code()
                     cur.execute("SELECT 1 FROM users WHERE referral_code=%s", (code,))
+                    while cur.fetchone():
+                        code = _generate_code()
+                        cur.execute("SELECT 1 FROM users WHERE referral_code=%s", (code,))
 
                 # 确保占位手机号不冲突
                 cur.execute("SELECT 1 FROM users WHERE mobile=%s", (mobile,))
@@ -64,11 +81,31 @@ class WechatService:
                     cur.execute("SELECT 1 FROM users WHERE mobile=%s", (mobile,))
                     idx += 1
 
-                cur.execute(
-                    "INSERT INTO users(openid, mobile, password_hash, name, member_points, merchant_points, withdrawable_balance, status, referral_code) "
-                    "VALUES (%s, %s, %s, %s, 0, 0, 0, %s, %s)",
-                    (openid, mobile, pwd_hash, nick_name, int(UserStatus.NORMAL), code)
-                )
+                vals = []
+                for col in insert_cols:
+                    if col == "openid":
+                        vals.append(openid)
+                    elif col == "mobile":
+                        vals.append(mobile)
+                    elif col == "password_hash":
+                        vals.append(pwd_hash)
+                    elif col == "name":
+                        vals.append(nick_name)
+                    elif col in ("member_points", "merchant_points"):
+                        vals.append(0)
+                    elif col == "withdrawable_balance":
+                        vals.append(0)
+                    elif col == "status":
+                        vals.append(int(UserStatus.NORMAL))
+                    elif col == "referral_code":
+                        vals.append(code)
+                    else:
+                        vals.append(None)
+
+                cols_sql = ",".join(insert_cols)
+                placeholders = ",".join(["%s"] * len(insert_cols))
+                sql = f"INSERT INTO users({cols_sql}) VALUES ({placeholders})"
+                cur.execute(sql, tuple(vals))
                 conn.commit()
                 return cur.lastrowid
 
