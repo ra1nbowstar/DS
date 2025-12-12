@@ -389,11 +389,28 @@ def set_level(body: SetLevelReq):
 def user_info(mobile: str):
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                "SELECT id, mobile, name, avatar_path, member_level, referral_code "
-                "FROM users WHERE mobile=%s AND status != %s",
-                (mobile, UserStatus.DELETED.value)
-            )
+            # 嗅探 users 表真实字段，动态构造查询以兼容老表结构
+            cur.execute("SHOW COLUMNS FROM users")
+            cols = [r["Field"] for r in cur.fetchall()]
+
+            # 仅选择实际存在的列，兼容老表结构
+            select_cols = ["id", "mobile"]
+            if "name" in cols:
+                select_cols.append("name")
+            if "avatar_path" in cols:
+                select_cols.append("avatar_path")
+            if "member_level" in cols:
+                select_cols.append("member_level")
+            if "referral_code" in cols:
+                select_cols.append("referral_code")
+
+            sql = "SELECT " + ", ".join(select_cols) + " FROM users WHERE mobile=%s"
+            params = [mobile]
+            if "status" in cols:
+                sql += " AND status != %s"
+                params.append(UserStatus.DELETED.value)
+
+            cur.execute(sql, tuple(params))
             u = cur.fetchone()
             if not u:
                 raise HTTPException(status_code=404, detail="用户不存在或已注销")
@@ -428,20 +445,34 @@ def user_info(mobile: str):
             )
             team_total = cur.fetchone()["c"]
 
-            cur.execute(
-                "SELECT member_points, merchant_points, withdrawable_balance "
-                "FROM users WHERE id=%s",
-                (u["id"],)
-            )
-            assets = cur.fetchone()
+            # 读取资产字段，缺失时降级为 0
+            asset_fields = ["member_points", "merchant_points", "withdrawable_balance"]
+            present_assets = [f for f in asset_fields if f in cols]
+            assets = {f: 0 for f in asset_fields}
+            if present_assets:
+                cur.execute(
+                    f"SELECT {', '.join(present_assets)} FROM users WHERE id=%s",
+                    (u["id"],)
+                )
+                fetched = cur.fetchone() or {}
+                for f in present_assets:
+                    assets[f] = fetched.get(f) if fetched.get(f) is not None else 0
+
+    # 安全映射返回值，缺失字段降级为合理默认
+    uid = u.get("id")
+    mobile_v = u.get("mobile")
+    name_v = u.get("name") if "name" in cols else None
+    avatar_v = u.get("avatar_path") if "avatar_path" in cols else None
+    member_level_v = u.get("member_level") if "member_level" in cols and u.get("member_level") is not None else 0
+    referral_v = u.get("referral_code") if "referral_code" in cols else None
 
     return UserInfoResp(
-        uid=u["id"],
-        mobile=u["mobile"],
-        name=u["name"],
-        avatar_path=u["avatar_path"],
-        member_level=u["member_level"],
-        referral_code=u["referral_code"],
+        uid=uid,
+        mobile=mobile_v,
+        name=name_v,
+        avatar_path=avatar_v,
+        member_level=member_level_v,
+        referral_code=referral_v,
         direct_count=direct_count,
         team_total=team_total,
         assets={
