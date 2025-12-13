@@ -679,14 +679,22 @@ def upload_images(
                 except Exception:
                     detail_urls = []
 
-                # 初始化 banner_urls：从 banner 表中读取现有轮播图（status=1），为空则为 []
-                cur.execute("""
-                    SELECT image_url FROM banner
-                    WHERE product_id = %s AND status = 1
-                    ORDER BY sort_order
-                """, (id,))
-                rows = cur.fetchall()
-                banner_urls = [r['image_url'] for r in rows] if rows else []
+                # 初始化 banner_urls：兼容 products.main_image 存储为 JSON 列表或单字符串
+                raw_main = product.get('main_image')
+                try:
+                    if raw_main:
+                        if isinstance(raw_main, str) and raw_main.strip().startswith('['):
+                            parsed = json.loads(raw_main)
+                            banner_urls = parsed if isinstance(parsed, list) else []
+                        elif isinstance(raw_main, list):
+                            banner_urls = raw_main
+                        else:
+                            # 单张字符串则作为首项
+                            banner_urls = [raw_main]
+                    else:
+                        banner_urls = []
+                except Exception:
+                    banner_urls = []
 
                 category = product['category']
                 cat_path = BASE_PIC_DIR / category
@@ -717,10 +725,8 @@ def upload_images(
                 if banner_images:
                     if len(banner_images) > 10:
                         raise HTTPException(status_code=400, detail="轮播图最多10张")
-                    # 删除旧轮播图
-                    cur.execute("DELETE FROM banner WHERE product_id = %s", (id,))
-
-                    for idx, f in enumerate(banner_images):
+                    # 将上传的轮播图文件保存并加入 banner_urls 列表（与 detail_images 行为一致）
+                    for f in banner_images:
                         ext = Path(f.filename).suffix.lower()
                         if ext not in {".jpg", ".jpeg", ".png", ".webp"}:
                             raise HTTPException(status_code=400, detail="仅支持 JPG/PNG/WEBP")
@@ -734,12 +740,8 @@ def upload_images(
                             im.save(file_path, "JPEG", quality=85, optimize=True)
                         url = f"/pic/{category}/{id}/{file_name}"
                         banner_urls.append(url)
-                        cur.execute("""
-                            INSERT INTO banner (product_id, image_url, sort_order, status)
-                            VALUES (%s, %s, %s, %s)
-                        """, (id, url, idx, 1))
 
-                    # 更新商品主图
+                    # 更新 products.main_image 为 JSON 列表（与 detail_images 一致）
                     if banner_urls:
                         cur.execute("UPDATE products SET main_image = %s WHERE id = %s",
                                     (json.dumps(banner_urls, ensure_ascii=False), id))
