@@ -78,7 +78,7 @@ class DatabaseManager:
                     level_changed_at DATETIME NULL,
                     referral_id BIGINT UNSIGNED NULL COMMENT '推荐人id',
                     referral_code VARCHAR(6) NULL COMMENT '推荐码',
-                    withdrawable_balance BIGINT NOT NULL DEFAULT 0 COMMENT '可提现余额',
+                    withdrawable_balance DECIMAL(14,2) NOT NULL DEFAULT 0.00 COMMENT '可提现余额',
                     avatar_path VARCHAR(255) NULL DEFAULT NULL COMMENT '头像路径',
                     is_merchant TINYINT(1) NOT NULL DEFAULT 0 COMMENT '判断是不是商家',
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -389,7 +389,7 @@ class DatabaseManager:
             'users': {
                 'member_points': 'member_points DECIMAL(12,4) NOT NULL DEFAULT 0.0000',
                 'merchant_points': 'merchant_points DECIMAL(12,4) NOT NULL DEFAULT 0.0000',
-                'withdrawable_balance': 'withdrawable_balance BIGINT NOT NULL DEFAULT 0 COMMENT \'可提现余额\'',
+                'withdrawable_balance': 'withdrawable_balance DECIMAL(14,2) NOT NULL DEFAULT 0.00 COMMENT \'可提现余额\'',
                 'is_merchant': 'is_merchant TINYINT(1) NOT NULL DEFAULT 0 COMMENT \'判断是不是商家\'',
                 'status': 'status TINYINT NOT NULL DEFAULT 1',
                 'avatar_path': 'avatar_path VARCHAR(255) NULL DEFAULT NULL COMMENT \'头像路径\'',
@@ -680,13 +680,20 @@ class DatabaseManager:
             ('平台收入池（会员商品）', 'platform_revenue_pool'),
         ]
 
-        cursor.execute("DELETE FROM finance_accounts")
-        for name, acc_type in accounts:
-            cursor.execute(
-                "INSERT INTO finance_accounts (account_name, account_type, balance) VALUES (%s, %s, 0)",
-                (name, acc_type)
-            )
-        logger.debug(f"初始化 {len(accounts)} 个资金池账户")
+        # 检查是否已存在账户，如果存在则不删除重新初始化
+        cursor.execute("SELECT COUNT(*) as count FROM finance_accounts")
+        count = cursor.fetchone()['count']
+
+        if count == 0:
+            # 只有表为空时才初始化
+            for name, acc_type in accounts:
+                cursor.execute(
+                    "INSERT INTO finance_accounts (account_name, account_type, balance) VALUES (%s, %s, 0)",
+                    (name, acc_type)
+                )
+            logger.info(f"✅ 初始化 {len(accounts)} 个资金池账户")
+        else:
+            logger.info(f"⚠️ finance_accounts 表已存在 {count} 条记录，跳过初始化（保留现有余额）")
 
     def create_test_data(self, cursor, conn) -> int:
         logger.info("\n--- 创建测试数据 ---")

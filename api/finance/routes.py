@@ -397,8 +397,12 @@ async def distribute_subsidy(
         service: FinanceService = Depends(get_finance_service)
 ):
     try:
-        #success = service.distribute_weekly_subsidy()
-        return ResponseModel(success=True, message="周补贴发放成功（优惠券）")
+        # 实际调用服务层方法
+        success = service.distribute_weekly_subsidy()
+        if success:
+            return ResponseModel(success=True, message="周补贴发放成功（优惠券）")
+        else:
+            raise HTTPException(status_code=500, detail="补贴发放失败，请检查日志")
     except Exception as e:
         logger.error(f"周补贴失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -537,14 +541,25 @@ async def audit_withdrawal(
         request: WithdrawalAuditRequest,
         service: FinanceService = Depends(get_finance_service)
 ):
+    """审核提现申请"""
     try:
-        #success = service.audit_withdrawal(**request.model_dump())
-        return ResponseModel(success=True, message="审核完成")
+        success = service.audit_withdrawal(
+            withdrawal_id=request.withdrawal_id,
+            approve=request.approve,
+            auditor=request.auditor
+        )
+
+        if success:
+            action = "批准" if request.approve else "拒绝"
+            return ResponseModel(success=True, message=f"提现已{action}")
+        else:
+            raise HTTPException(status_code=500, detail="审核失败，请检查日志")
+
     except FinanceException as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logger.error(f"提现审核失败: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"提现审核失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"审核异常: {str(e)}")
 
 
 @router.post("/api/rewards/audit", response_model=ResponseModel, summary="批量审核奖励")
@@ -553,14 +568,17 @@ async def audit_rewards(
         service: FinanceService = Depends(get_finance_service)
 ):
     try:
-        #success = service.audit_and_distribute_rewards(request.reward_ids, request.approve, request.auditor)
-        action = "批准" if request.approve else "拒绝"
-        return ResponseModel(success=True, message=f"已{action} {len(request.reward_ids)} 条奖励记录")
+        success = service.audit_and_distribute_rewards(request.reward_ids, request.approve, request.auditor)
+        if success:
+            action = "批准" if request.approve else "拒绝"
+            return ResponseModel(success=True, message=f"已{action} {len(request.reward_ids)} 条奖励记录")
+        else:
+            raise HTTPException(status_code=500, detail="审核失败，请检查日志")
     except FinanceException as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logger.error(f"批量审核奖励失败: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"批量审核奖励失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"审核异常: {str(e)}")
 
 
 @router.get("/api/rewards/pending", response_model=ResponseModel, summary="查询奖励列表")
