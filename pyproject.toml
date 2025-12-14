@@ -18,6 +18,7 @@ dependencies = [
     "python-multipart>=0.0.20",
 ]
 
-[index]
+[[tool.uv.index]]
+name = "aliyun"
 url = "https://mirrors.aliyun.com/pypi/simple/"
-default = true
+

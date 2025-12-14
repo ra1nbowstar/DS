@@ -11,6 +11,7 @@ logs/
 *.log
 *.xml
 *.iml
+*.service
 # Virtual environments
 .venv
 .env

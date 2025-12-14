@@ -1,6 +1,6 @@
 from decimal import Decimal
 from core.database import get_conn
-from core.table_access import build_dynamic_select, get_table_structure, clear_table_cache
+from core.table_access import build_dynamic_select, get_table_structure, clear_table_cache, _quote_identifier
 from core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -29,8 +29,8 @@ def add_points(user_id: int, type: str, amount: Decimal, reason: str = "系统�
             if points_field not in columns:
                 try:
                     cur.execute(
-                        f"ALTER TABLE users ADD COLUMN {points_field} DECIMAL(12,4) NOT NULL DEFAULT 0.0000 COMMENT '积分字段'"
-                    )
+                            f"ALTER TABLE {_quote_identifier('users')} ADD COLUMN {_quote_identifier(points_field)} DECIMAL(12,4) NOT NULL DEFAULT 0.0000 COMMENT '积分字段'"
+                        )
                     conn.commit()
                     # 清除缓存，确保下次获取最新结构
                     from core.table_access import clear_table_cache
@@ -44,20 +44,20 @@ def add_points(user_id: int, type: str, amount: Decimal, reason: str = "系统�
             # 如果字段不存在，使用 0 作为默认值
             try:
                 cur.execute(
-                    f"UPDATE users SET {points_field}=COALESCE({points_field}, 0)+%s WHERE id=%s",
+                    f"UPDATE {_quote_identifier('users')} SET {_quote_identifier(points_field)}=COALESCE({_quote_identifier(points_field)}, 0)+%s WHERE id=%s",
                     (amount, user_id)
                 )
             except Exception as e:
                 # 如果字段仍然不存在，尝试再次创建
                 if "Unknown column" in str(e):
                     cur.execute(
-                        f"ALTER TABLE users ADD COLUMN {points_field} DECIMAL(12,4) NOT NULL DEFAULT 0.0000 COMMENT '积分字段'"
+                        f"ALTER TABLE {_quote_identifier('users')} ADD COLUMN {_quote_identifier(points_field)} DECIMAL(12,4) NOT NULL DEFAULT 0.0000 COMMENT '积分字段'"
                     )
                     conn.commit()
                     clear_table_cache("users")
                     # 重试更新
                     cur.execute(
-                        f"UPDATE users SET {points_field}=COALESCE({points_field}, 0)+%s WHERE id=%s",
+                        f"UPDATE {_quote_identifier('users')} SET {_quote_identifier(points_field)}=COALESCE({_quote_identifier(points_field)}, 0)+%s WHERE id=%s",
                         (amount, user_id)
                     )
                 else:

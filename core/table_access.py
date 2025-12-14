@@ -4,6 +4,7 @@
 """
 from typing import Dict, List, Optional, Tuple
 from decimal import Decimal
+import re
 
 
 # 缓存表结构信息，避免重复查询
@@ -64,6 +65,33 @@ def get_table_structure(cursor, table_name: str, use_cache: bool = True) -> Dict
     return result
 
 
+_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _quote_identifier(name: str) -> str:
+    """安全地引用 SQL 标识符（表名、列名）。
+
+    只允许字母、数字和下划线，且不能以数字开头；否则抛出 ValueError。
+    返回带反引号的标识符，防止注入。
+    """
+    if not isinstance(name, str):
+        raise ValueError("identifier must be a string")
+
+    if _IDENT_RE.match(name):
+        return f"`{name}`"
+    # 对于形如 schema.table 或 alias.col 的形式，逐段校验
+    if "." in name:
+        parts = name.split(".")
+        quoted_parts = []
+        for p in parts:
+            if not _IDENT_RE.match(p):
+                raise ValueError(f"invalid identifier part: {p}")
+            quoted_parts.append(f"`{p}`")
+        return ".".join(quoted_parts)
+
+    raise ValueError(f"invalid identifier: {name}")
+
+
 def build_select_sql(table_name: str, structure: Dict[str, any], 
                      where_clause: Optional[str] = None,
                      order_by: Optional[str] = None,
@@ -94,30 +122,39 @@ def build_select_sql(table_name: str, structure: Dict[str, any],
         if isinstance(field, str) and field.isdigit():
             select_parts.append(field)
             continue
+        # 对字段名进行白名单校验与引用，防止注入
         if field not in existing_fields:
-            # 字段不存在，使用默认值
+            # 字段不存在，使用默认值并引用别名
             if field in asset_fields or any(num_type in field.lower() for num_type in ['points', 'balance', 'amount']):
-                # 数值类型字段，默认为 0
-                select_parts.append(f"0 AS {field}")
+                select_parts.append(f"0 AS {_quote_identifier(field)}")
             else:
-                # 非数值字段，默认为 NULL
-                select_parts.append(f"NULL AS {field}")
+                select_parts.append(f"NULL AS {_quote_identifier(field)}")
         elif field in asset_fields:
-            # 资产字段：如果不存在则默认为 0
-            select_parts.append(f"COALESCE({field}, 0) AS {field}")
+            # 资产字段：引用字段并使用 COALESCE
+            select_parts.append(f"COALESCE({_quote_identifier(field)}, 0) AS {_quote_identifier(field)}")
         else:
-            # 非资产字段：直接选择
-            select_parts.append(field)
+            # 非资产字段：直接引用字段名
+            select_parts.append(_quote_identifier(field))
     
-    sql = f"SELECT {', '.join(select_parts)} FROM {table_name}"
+    # 引用表名
+    sql = f"SELECT {', '.join(select_parts)} FROM {_quote_identifier(table_name)}"
     
     if where_clause:
+        # where_clause 可能包含参数占位符，仍然允许使用占位符，但禁止分号等附加语句
+        if ";" in where_clause or "--" in where_clause or "/*" in where_clause:
+            raise ValueError("unsafe characters in where_clause")
         sql += f" WHERE {where_clause}"
     
     if order_by:
+        # 简单校验 ORDER BY，避免附加非标识符字符
+        if ";" in order_by or "--" in order_by or "/*" in order_by:
+            raise ValueError("unsafe characters in order_by")
         sql += f" ORDER BY {order_by}"
     
     if limit:
+        # 仅允许数字或数字,数字 的形式
+        if not re.match(r"^\d+(,\s*\d+)?$", str(limit)):
+            raise ValueError("unsafe limit clause")
         sql += f" LIMIT {limit}"
     
     return sql
