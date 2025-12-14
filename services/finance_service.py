@@ -18,7 +18,8 @@ from core.database import get_conn
 from core.db_adapter import PyMySQLAdapter
 from core.exceptions import FinanceException, OrderException, InsufficientBalanceException
 from core.logging import get_logger
-from core.table_access import build_dynamic_select, get_table_structure
+from core.table_access import build_dynamic_select, get_table_structure, _quote_identifier
+from core.db_adapter import build_in_placeholders
 
 logger = get_logger(__name__)
 
@@ -396,8 +397,7 @@ class FinanceService:
             if not reward_ids:
                 raise FinanceException("奖励ID列表不能为空")
 
-            placeholders = ','.join(['%s' for _ in range(len(reward_ids))])
-            params = {f"id{i}": rid for i, rid in enumerate(reward_ids)}
+            placeholders, params = build_in_placeholders(reward_ids)
 
             result = self.session.execute(
                 f"""SELECT id, user_id, reward_type, amount, order_id, layer
@@ -469,15 +469,16 @@ class FinanceService:
 
                 # 动态构造 SELECT 字段列表，对资产字段做降级默认值处理
                 select_fields = []
+                from core.table_access import _quote_identifier
+
                 for col_name in column_names:
                     if col_name in asset_fields:
-                        # 对资产字段使用 COALESCE 提供默认值 0
-                        select_fields.append(f"COALESCE(pr.{col_name}, 0) AS {col_name}")
+                        select_fields.append(f"COALESCE({_quote_identifier('pr.' + col_name)}, 0) AS {_quote_identifier(col_name)}")
                     else:
-                        select_fields.append(f"pr.{col_name}")
+                        select_fields.append(_quote_identifier('pr.' + col_name))
 
                 # 添加用户名称字段
-                select_fields.append("u.name AS user_name")
+                select_fields.append(f"{_quote_identifier('u.name')} AS {_quote_identifier('user_name')}")
 
                 # 构造完整的 SELECT 语句
                 params = [status, limit]
@@ -814,7 +815,7 @@ class FinanceService:
             withdrawal_id = result.lastrowid
 
             self.session.execute(
-                f"UPDATE users SET {balance_field} = {balance_field} - %s WHERE id = %s",
+                f"UPDATE users SET {_quote_identifier(balance_field)} = {_quote_identifier(balance_field)} - :amount WHERE id = :user_id",
                 {"amount": amount_decimal, "user_id": user_id}
             )
 
@@ -858,6 +859,8 @@ class FinanceService:
 
             # 识别资产字段关键词（数值类型字段）
             asset_keywords = ['balance', 'points', 'amount', 'total', 'frozen', 'available', 'tax']
+            from core.table_access import _quote_identifier
+
             select_fields = []
             for col in columns:
                 field_name = col['Field']
@@ -867,13 +870,12 @@ class FinanceService:
                 is_numeric_type = 'DECIMAL' in field_type or 'INT' in field_type or 'FLOAT' in field_type or 'DOUBLE' in field_type
 
                 if is_asset_field and is_numeric_type:
-                    # 对资产字段做降级默认值（不存在或为NULL时返回0）
-                    select_fields.append(f"COALESCE({field_name}, 0) AS {field_name}")
+                    select_fields.append(f"COALESCE({_quote_identifier(field_name)}, 0) AS {_quote_identifier(field_name)}")
                 else:
-                    select_fields.append(field_name)
+                    select_fields.append(_quote_identifier(field_name))
 
             # 动态构造 SELECT 语句，使用 self.session 执行（确保在同一事务中）
-            select_sql = f"SELECT {', '.join(select_fields)} FROM withdrawals WHERE id = :withdrawal_id FOR UPDATE"
+            select_sql = f"SELECT {', '.join(select_fields)} FROM {_quote_identifier('withdrawals')} WHERE id = :withdrawal_id FOR UPDATE"
             result = self.session.execute(select_sql, {"withdrawal_id": withdrawal_id})
             withdraw = result.fetchone()
 
@@ -903,7 +905,7 @@ class FinanceService:
             else:
                 balance_field = 'promotion_balance' if withdraw.withdrawal_type == 'user' else 'merchant_balance'
                 self.session.execute(
-                    f"UPDATE users SET {balance_field} = {balance_field} + %s WHERE id = %s",
+                    f"UPDATE users SET {_quote_identifier(balance_field)} = {_quote_identifier(balance_field)} + :amount WHERE id = :user_id",
                     {"amount": withdraw.amount, "user_id": withdraw.user_id}
                 )
 
@@ -999,10 +1001,12 @@ class FinanceService:
     def _update_user_balance(self, user_id: int, field: str, delta: Decimal) -> Decimal:
         """对 `users` 表的指定余额字段做增减，并返回更新后的值。
         注意：`field` 必须是受信任的字段名（由调用处保证）。"""
-        # 使用字符串插值构造字段位置（确保调用方只传入受控字段名）
-        # 关键修改：使用COALESCE处理DECIMAL字段，避免NULL值
+        # 安全地引用字段名并使用命名参数执行更新
+        from core.table_access import _quote_identifier
+
+        quoted_field = _quote_identifier(field)
         self.session.execute(
-            f"UPDATE users SET {field} = COALESCE({field}, 0) + %s WHERE id = %s",
+            f"UPDATE users SET {quoted_field} = COALESCE({quoted_field}, 0) + :delta WHERE id = :user_id",
             {"delta": delta, "user_id": user_id}
         )
         # 使用动态表访问获取更新后的值
@@ -1337,6 +1341,8 @@ class FinanceService:
 
                 # 识别资产字段关键词（数值类型字段）
                 asset_keywords = ['balance', 'points', 'amount', 'total', 'frozen', 'available']
+                from core.table_access import _quote_identifier
+
                 select_fields = []
                 for col in columns:
                     field_name = col['Field']
@@ -1346,13 +1352,12 @@ class FinanceService:
                     is_numeric_type = 'DECIMAL' in field_type or 'INT' in field_type or 'FLOAT' in field_type or 'DOUBLE' in field_type
 
                     if is_asset_field and is_numeric_type:
-                        # 对资产字段做降级默认值（不存在或为NULL时返回0）
-                        select_fields.append(f"COALESCE({field_name}, 0) AS {field_name}")
+                        select_fields.append(f"COALESCE({_quote_identifier(field_name)}, 0) AS {_quote_identifier(field_name)}")
                     else:
-                        select_fields.append(field_name)
+                        select_fields.append(_quote_identifier(field_name))
 
                 # 动态构造 SELECT 语句
-                select_sql = f"SELECT {', '.join(select_fields)} FROM finance_accounts"
+                select_sql = f"SELECT {', '.join(select_fields)} FROM {_quote_identifier('finance_accounts')}"
                 cur.execute(select_sql)
                 pools = cur.fetchall()
 
@@ -1418,15 +1423,15 @@ class FinanceService:
                         asset_fields.add(field_name)
 
                 # 动态构造 SELECT 语句，对资产字段做降级默认值处理
+                from core.table_access import _quote_identifier
                 select_parts = []
                 for field in all_fields:
                     if field in asset_fields:
-                        # 资产字段：如果为 NULL 则返回 0
-                        select_parts.append(f"COALESCE({field}, 0) AS {field}")
+                        select_parts.append(f"COALESCE({_quote_identifier(field)}, 0) AS {_quote_identifier(field)}")
                     else:
-                        select_parts.append(field)
+                        select_parts.append(_quote_identifier(field))
 
-                sql = f"SELECT {', '.join(select_parts)} FROM account_flow ORDER BY created_at DESC LIMIT %s"
+                sql = f"SELECT {', '.join(select_parts)} FROM {_quote_identifier('account_flow')} ORDER BY created_at DESC LIMIT %s"
                 cur.execute(sql, (limit,))
                 flows = cur.fetchall()
 
@@ -1488,6 +1493,8 @@ class FinanceService:
 
                 # 识别资产字段关键词（数值类型字段）
                 asset_keywords = ['amount', 'points', 'balance', 'total', 'frozen', 'available']
+                from core.table_access import _quote_identifier
+
                 select_fields = []
                 asset_fields = []
                 for col in columns:
@@ -1498,14 +1505,13 @@ class FinanceService:
                     is_numeric_type = 'DECIMAL' in field_type or 'INT' in field_type or 'FLOAT' in field_type or 'DOUBLE' in field_type
 
                     if is_asset_field and is_numeric_type:
-                        # 对资产字段做降级默认值（不存在或为NULL时返回0）
-                        select_fields.append(f"COALESCE(wsr.{field_name}, 0) AS {field_name}")
+                        select_fields.append(f"COALESCE({_quote_identifier('wsr.' + field_name)}, 0) AS {_quote_identifier(field_name)}")
                         asset_fields.append(field_name)
                     else:
-                        select_fields.append(f"wsr.{field_name}")
+                        select_fields.append(_quote_identifier('wsr.' + field_name))
 
                 # 添加用户名称字段
-                select_fields.append("u.name AS user_name")
+                select_fields.append(f"{_quote_identifier('u.name')} AS {_quote_identifier('user_name')}")
 
                 # 构造完整的 SELECT 语句
                 params = [limit]
@@ -1744,15 +1750,17 @@ def _build_team_rewards_select(cursor, asset_fields: List[str] = None) -> tuple:
     existing_columns = {col['Field'] for col in columns}
 
     # 构造 SELECT 字段列表
+    from core.table_access import _quote_identifier
+
     select_fields = []
     for col in columns:
         field_name = col['Field']
-        select_fields.append(field_name)
+        select_fields.append(_quote_identifier(field_name))
 
     # 对于资产字段，如果不存在则添加默认值
     for asset_field in asset_fields:
         if asset_field not in existing_columns:
-            select_fields.append(f"0 AS {asset_field}")
+            select_fields.append(f"0 AS {_quote_identifier(asset_field)}")
 
     return ", ".join(select_fields), existing_columns
 

@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from typing import Optional, Any, Dict, List
 from core.database import get_conn
 import pymysql
+from typing import Iterable, Tuple
 
 
 class PyMySQLAdapter:
@@ -47,14 +48,28 @@ class PyMySQLAdapter:
             self._conn = get_conn().__enter__()
             self._cursor = self._conn.cursor()
         
+        # 简单校验 SQL，拒绝包含多语句或注释的输入
+        self._validate_sql(sql)
+
         # 将 :param 格式转换为 %s 格式
         if params:
             sql, values = self._convert_sql_params(sql, params)
         else:
             values = None
-        
+
         self._cursor.execute(sql, values)
         return ResultProxy(self._cursor)
+
+    def _validate_sql(self, sql: str):
+        """对即将执行的 SQL 做简单安全校验，拒绝多语句和注释。
+
+        说明：此校验为防御层之一，不能替代参数化查询和标识符白名单。
+        """
+        if not isinstance(sql, str):
+            raise ValueError("sql must be a string")
+        # 禁止分号（避免多语句）、行注释和块注释
+        if ";" in sql or "--" in sql or "/*" in sql or "*/" in sql:
+            raise ValueError("unsafe SQL detected")
     
     def _convert_sql_params(self, sql: str, params: Dict[str, Any]) -> tuple:
         """将命名参数格式 `:param` 转换为 PyMySQL 的 `%s` 格式，并返回转换后的 SQL 和参数元组"""
@@ -94,6 +109,20 @@ class PyMySQLAdapter:
         else:
             self.commit()
         self.close()
+
+
+def build_in_placeholders(values: Iterable) -> Tuple[str, dict]:
+    """为 SQL IN(...) 构造占位符字符串和参数字典。
+
+    返回 (placeholders, params_dict)，其中 placeholders 例如 '%s,%s,%s'，
+    params_dict 为 {'id0': v0, 'id1': v1, ...}，方便传入本项目的 `PyMySQLAdapter.execute`。
+    """
+    vals = list(values)
+    if not vals:
+        raise ValueError("values must be a non-empty iterable")
+    placeholders = ','.join(['%s'] * len(vals))
+    params = {f"id{i}": v for i, v in enumerate(vals)}
+    return placeholders, params
 
 
 class ResultProxy:

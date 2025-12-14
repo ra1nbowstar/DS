@@ -1,5 +1,6 @@
 from typing import Optional
 from core.database import get_conn
+from core.table_access import get_table_structure, _quote_identifier
 
 
 class AddressService:
@@ -44,13 +45,21 @@ class AddressService:
     def update_address(user_id: int, addr_id: int, **kwargs):
         if not kwargs:
             raise ValueError("无更新内容")
-        set_clause = ", ".join([f"{k}=%s" for k in kwargs])
+        # 仅允许表中已存在的字段进行更新，并对列名进行引用
+        with get_conn() as _conn:
+            with _conn.cursor() as _cur:
+                structure = get_table_structure(_cur, "addresses")
+        allowed = set(structure['fields'])
+        for k in kwargs:
+            if k not in allowed:
+                raise ValueError(f"invalid column: {k}")
+        set_clause = ", ".join([f"{_quote_identifier(k)}=%s" for k in kwargs])
         values = list(kwargs.values()) + [addr_id, user_id]
         with get_conn() as conn:
             with conn.cursor() as cur:
                 if kwargs.get("is_default"):
                     cur.execute("UPDATE addresses SET is_default=0 WHERE user_id=%s", (user_id,))
-                cur.execute(f"UPDATE addresses SET {set_clause} WHERE id=%s AND user_id=%s", values)
+                cur.execute(f"UPDATE {_quote_identifier('addresses')} SET {set_clause} WHERE id=%s AND user_id=%s", values)
                 if cur.rowcount == 0:
                     raise ValueError("地址不存在或无权修改")
 

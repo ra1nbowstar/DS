@@ -10,7 +10,7 @@ from models.schemas.user import (
 
 from core.database import get_conn
 from core.logging import get_logger
-from core.table_access import build_dynamic_select, get_table_structure
+from core.table_access import build_dynamic_select, get_table_structure, _quote_identifier
 from services.user_service import UserService, UserStatus, verify_pwd, hash_pwd
 from services.address_service import AddressService
 from services.points_service import add_points
@@ -171,8 +171,8 @@ def update_profile(body: UpdateProfileReq):
                 return {"msg": "无字段需要更新"}
 
             # 6. 动态构造 SET 子句
-            set_clause = ", ".join([f"{k}=%s" for k in updates])
-            sql = f"UPDATE users SET {set_clause} WHERE id=%s"
+            set_clause = ", ".join([f"{_quote_identifier(k)}=%s" for k in updates])
+            sql = f"UPDATE {_quote_identifier('users')} SET {set_clause} WHERE id=%s"
             cur.execute(sql, tuple(updates.values()) + (user_id,))
             conn.commit()
             return {"msg": "ok"}
@@ -364,10 +364,10 @@ def upgrade(mobile: str):
             # 3. 动态 SET 子句（NOW() 不占位）
             set_parts = []
             args = []
-            set_parts.append("member_level=%s")
+            set_parts.append(f"{_quote_identifier('member_level')}=%s")
             args.append(new_level)
             if "level_changed_at" in cols:
-                set_parts.append("level_changed_at=NOW()")
+                set_parts.append(f"{_quote_identifier('level_changed_at')}=NOW()")
             sql = f"UPDATE users SET {', '.join(set_parts)} WHERE id=%s"
             args.append(user_id)          # 最后一个占位符
             cur.execute(sql, tuple(args)) # 参数数量 = 占位符数量
@@ -423,8 +423,8 @@ def set_level(body: SetLevelReq):
             if "level_changed_at" in user_cols:
                 updates["level_changed_at"] = "NOW()"   # SQL 函数特殊处理
 
-            set_clause = ", ".join([f"{k}=NOW()" if v == "NOW()" else f"{k}=%s" for k, v in updates.items()])
-            sql = f"UPDATE users SET {set_clause} WHERE id=%s"
+            set_clause = ", ".join([f"{_quote_identifier(k)}=NOW()" if v == "NOW()" else f"{_quote_identifier(k)}=%s" for k, v in updates.items()])
+            sql = f"UPDATE {_quote_identifier('users')} SET {set_clause} WHERE id=%s"
             vals = [v for v in updates.values() if v != "NOW()"] + [user_id]
             cur.execute(sql, tuple(vals))
 
@@ -696,9 +696,9 @@ def address_add(body: AddressReq):
                 raise RuntimeError("addresses表无可用字段")
 
             # 4. 插入
-            sql_cols = ",".join(insert_data.keys())
+            sql_cols = ",".join([_quote_identifier(k) for k in insert_data.keys()])
             placeholders = ",".join(["%s"] * len(insert_data))
-            sql = f"INSERT INTO addresses({sql_cols}) VALUES ({placeholders})"
+            sql = f"INSERT INTO {_quote_identifier('addresses')}({sql_cols}) VALUES ({placeholders})"
             cur.execute(sql, tuple(insert_data.values()))
             addr_id = cur.lastrowid
 
@@ -798,9 +798,9 @@ def return_addr_set(body: AddressReq):
             # 4. 取消其它退货默认
             cur.execute("UPDATE addresses SET is_default=0 WHERE user_id=%s AND addr_type='return'", (user_id,))
             # 5. 插入
-            sql_cols = ",".join(insert_data.keys())
+            sql_cols = ",".join([_quote_identifier(k) for k in insert_data.keys()])
             placeholders = ",".join(["%s"] * len(insert_data))
-            sql = f"INSERT INTO addresses({sql_cols}) VALUES ({placeholders})"
+            sql = f"INSERT INTO {_quote_identifier('addresses')}({sql_cols}) VALUES ({placeholders})"
             cur.execute(sql, tuple(insert_data.values()))
             addr_id = cur.lastrowid
             conn.commit()
@@ -886,21 +886,21 @@ def points_log(mobile: str, points_type: str = "member", page: int = 1, size: in
             select_fields = []
             for field in structure['fields']:
                 if field in structure['asset_fields']:
-                    select_fields.append(f"COALESCE({field}, 0) AS {field}")
+                    select_fields.append(f"COALESCE({_quote_identifier(field)}, 0) AS {_quote_identifier(field)}")
                 else:
-                    select_fields.append(field)
+                    select_fields.append(_quote_identifier(field))
             
             # 处理可能不存在的资产字段（如果表结构中没有这些字段，添加默认值）
             required_asset_fields = ['change_amount', 'balance_after']
             for asset_field in required_asset_fields:
                 if asset_field not in structure['fields']:
-                    select_fields.append(f"0 AS {asset_field}")
+                    select_fields.append(f"0 AS {_quote_identifier(asset_field)}")
             
             where, args = ["user_id=%s", "type=%s"], [u["id"], points_type]  # 修改为正确的列名 type
             sql_where = " AND ".join(where)
             sql = f"""
                 SELECT {', '.join(select_fields)}
-                FROM points_log
+                FROM {_quote_identifier('points_log')}
                 WHERE {sql_where}
                 ORDER BY created_at DESC
                 LIMIT %s OFFSET %s
@@ -908,7 +908,7 @@ def points_log(mobile: str, points_type: str = "member", page: int = 1, size: in
             args.extend([size, (page - 1) * size])
             cur.execute(sql, tuple(args))
             rows = cur.fetchall()
-            cur.execute(f"SELECT COUNT(*) AS c FROM points_log WHERE {sql_where}", tuple(args[:-2]))
+            cur.execute(f"SELECT COUNT(*) AS c FROM {_quote_identifier('points_log')} WHERE {sql_where}", tuple(args[:-2]))
             total = cur.fetchone()["c"]
             return {"rows": rows, "total": total, "page": page, "size": size}
 
@@ -1035,7 +1035,14 @@ async def wechat_login(request: Request):
     # 确保 users 表存在 openid 字段（兼容旧库）
     WechatService.ensure_openid_column()
 
-    data = await request.json()
+    try:
+        data = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid JSON payload")
+
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=400, detail="invalid JSON payload")
+
     code = data.get('code')
     nick_name = data.get('nickName')
 

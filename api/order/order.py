@@ -4,7 +4,7 @@ from typing import Optional
 from core.database import get_conn
 from services.finance_service import split_order_funds
 from core.config import VALID_PAY_WAYS
-from core.table_access import build_dynamic_select, get_table_structure
+from core.table_access import build_dynamic_select, get_table_structure, _quote_identifier
 from decimal import Decimal
 import uuid
 from datetime import datetime, timedelta
@@ -19,9 +19,9 @@ class OrderManager:
         select_parts = []
         for field in structure['fields']:
             if field in structure['asset_fields']:
-                select_parts.append(f"COALESCE({field}, 0) AS {field}")
+                select_parts.append(f"COALESCE({_quote_identifier(field)}, 0) AS {_quote_identifier(field)}")
             else:
-                select_parts.append(field)
+                select_parts.append(_quote_identifier(field))
         return ", ".join(select_parts)
 
     @staticmethod
@@ -58,12 +58,13 @@ class OrderManager:
                 structure = get_table_structure(cur, "product_skus")
                 has_stock_field = 'stock' in structure['fields']
                 if has_stock_field:
-                    stock_select = "COALESCE(stock, 0) AS stock" if 'stock' in structure['asset_fields'] else "stock"
+                    stock_select = (f"COALESCE({_quote_identifier('stock')}, 0) AS {_quote_identifier('stock')}"
+                                    if 'stock' in structure['asset_fields'] else _quote_identifier('stock'))
                 else:
-                    stock_select = "0 AS stock"
+                    stock_select = f"0 AS {_quote_identifier('stock')}"
 
                 for i in items:
-                    cur.execute(f"SELECT {stock_select} FROM product_skus WHERE product_id=%s", (i['product_id'],))
+                    cur.execute(f"SELECT {stock_select} FROM {_quote_identifier('product_skus')} WHERE product_id=%s", (i['product_id'],))
                     result = cur.fetchone()
                     product_stock = result.get('stock', 0) if result else 0
                     if product_stock < i["quantity"]:

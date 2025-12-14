@@ -3,7 +3,7 @@ import bcrypt
 from typing import Optional
 from enum import IntEnum
 from core.database import get_conn
-from core.table_access import build_dynamic_select
+from core.table_access import build_dynamic_select, _quote_identifier
 import string
 import random
 
@@ -92,9 +92,9 @@ class UserService:
                     else:
                         vals.append(None)
 
-                cols_sql = ",".join(insert_cols)
+                cols_sql = ",".join([_quote_identifier(c) for c in insert_cols])
                 placeholders = ",".join(["%s"] * len(insert_cols))
-                sql = f"INSERT INTO users({cols_sql}) VALUES ({placeholders})"
+                sql = f"INSERT INTO {_quote_identifier('users')}({cols_sql}) VALUES ({placeholders})"
                 cur.execute(sql, tuple(vals))
                 uid = cur.lastrowid
                 conn.commit()

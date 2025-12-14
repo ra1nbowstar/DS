@@ -290,18 +290,18 @@ async def use_coupon(
                 asset_fields = {'amount'}
                 
                 # 动态构造 SELECT 语句，对资产字段设置降级默认值
+                from core.table_access import _quote_identifier
+
                 select_parts = []
                 for col in columns:
                     field_name = col['Field']
                     if field_name in asset_fields:
-                        # 资产字段：如果不存在或为 NULL，返回 0
-                        select_parts.append(f"COALESCE({field_name}, 0) AS {field_name}")
+                        select_parts.append(f"COALESCE({_quote_identifier(field_name)}, 0) AS {_quote_identifier(field_name)}")
                     else:
-                        # 普通字段：直接选择
-                        select_parts.append(field_name)
+                        select_parts.append(_quote_identifier(field_name))
                 
-                select_sql = "SELECT " + ", ".join(select_parts)
-                query_sql = f"""{select_sql} FROM coupons 
+                  select_sql = "SELECT " + ", ".join(select_parts)
+                  query_sql = f"""{select_sql} FROM {_quote_identifier('coupons')} 
                        WHERE id = %s AND user_id = %s AND status = 'unused'
                        AND valid_from <= CURDATE() AND valid_to >= CURDATE()"""
                 
