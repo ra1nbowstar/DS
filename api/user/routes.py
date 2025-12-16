@@ -1,4 +1,4 @@
-from fastapi import HTTPException, APIRouter, Request
+from fastapi import HTTPException, APIRouter, Request,File, UploadFile
 import uuid
 import datetime
 
@@ -1156,3 +1156,11 @@ def get_unilevel(mobile: str):
                 raise HTTPException(status_code=404, detail="用户不存在")
             level = UserService.get_unilevel(u["id"])
             return {"unilevel": level}
+
+@router.post("/user/upload-avatar", summary="上传用户头像")
+def upload_avatar(user_id: int, avatar_file: UploadFile = File(...)):
+    try:
+        avatar_path = UserService.upload_avatar(user_id, avatar_file)
+        return {"avatar_path": avatar_path}
+    except HTTPException as e:
+        raise e

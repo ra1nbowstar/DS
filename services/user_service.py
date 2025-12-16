@@ -6,6 +6,9 @@ from core.database import get_conn
 from core.table_access import build_dynamic_select, _quote_identifier
 import string
 import random
+import os
+from core.config import AVATAR_UPLOAD_DIR
+from fastapi import UploadFile, HTTPException
 
 
 # ========== 用户状态枚举 ==========
@@ -339,3 +342,29 @@ class UserService:
             if not cur.fetchone():
                 return False
         return True
+
+    @staticmethod
+    def upload_avatar(user_id: int, avatar_file: UploadFile) -> str:
+        """上传用户头像"""
+        # 1. 检查文件类型（可选）
+        if not avatar_file.content_type.startswith("image/"):
+            raise HTTPException(status_code=400, detail="只支持图片文件")
+
+        # 2. 构造存储路径
+        file_extension = os.path.splitext(avatar_file.filename)[1]
+        avatar_path = AVATAR_UPLOAD_DIR / f"{user_id}{file_extension}"
+
+        # 3. 保存文件
+        with open(avatar_path, "wb") as f:
+            f.write(avatar_file.file.read())
+
+        # 4. 更新数据库
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE users SET avatar_path=%s WHERE id=%s",
+                    (str(avatar_path), user_id)
+                )
+                conn.commit()
+
+        return str(avatar_path)
