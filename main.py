@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from core.json_response import DecimalJSONResponse, register_exception_handlers
 from fastapi.staticfiles import StaticFiles
 from core.middleware import setup_cors, setup_static_files
-from core.config import get_db_config, PIC_PATH
+from core.config import get_db_config, PIC_PATH, AVATAR_UPLOAD_DIR
 from core.logging import setup_logging
 from database_setup import initialize_database
 
@@ -89,6 +89,8 @@ tags_metadata = [
 # 更新 OpenAPI Schema 的 tags 元数据
 app.openapi_tags = tags_metadata
 
+# 按优先级先挂载 avatars（用户头像），再挂载 /pic 到商品图片目录
+app.mount("/pic/avatars", StaticFiles(directory=str(AVATAR_UPLOAD_DIR)), name="avatars")
 app.mount("/pic", StaticFiles(directory=str(PIC_PATH)), name="pic")
 # 添加 CORS 中间件和静态文件（统一配置）pic_path
 setup_cors(app)
