@@ -79,7 +79,7 @@ class UnilevelLevel(IntEnum):
 
 
 # ==================== 图片存储路径 ====================
-# 图片存储在与 main.py 同一级的 user_pic 文件夹
+# 用户头像存储在与 main.py 同一级的 `user_pic/avatars` 文件夹
 BASE_PIC_DIR: Final[Path] = Path(__file__).resolve().parent.parent / "user_pic"
 AVATAR_UPLOAD_DIR: Final[Path] = BASE_PIC_DIR / "avatars"
 AVATAR_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -140,7 +140,8 @@ WECHAT_APP_SECRET: Final[str] = os.getenv('WECHAT_APP_SECRET', '')
 
 # ==================== 商品图片配置 ====================
 # 挂载静态文件目录（/pic -> pic_data）
-PIC_PATH: Final[Path] = Path(__file__).resolve().parent.parent / "user_pic"
+# 将 `PIC_PATH` 指向存放商品图片的 `pic_data` 目录，保证 `/pic/<分类>/...` 能正确映射到磁盘文件
+PIC_PATH: Final[Path] = Path(__file__).resolve().parent.parent / "pic_data"
 
 # 向后兼容：Wechat_ID 字典
 Wechat_ID: Final[dict] = {
