@@ -2306,22 +2306,25 @@ class FinanceService:
                         (coupon_id,)
                     )
 
-                    # 记录优惠券使用流水（关键增强）
-                    self._insert_account_flow(
-                        account_type='coupon',
-                        related_user=user_id,
-                        change_amount=0,  # 优惠券本身不产生资金流动，仅记录
-                        flow_type='expense',  # 用户"支出"了优惠券
-                        remark=f"用户使用优惠券 - 优惠券#{coupon_id}，抵扣金额¥{coupon_amount:.2f}"
+                    # 记录优惠券使用流水（在当前事务的同一 cursor 上执行，保证原子性）
+                    # 获取对应账户的当前余额（finance_accounts 表）
+                    cur.execute("SELECT balance FROM finance_accounts WHERE account_type = %s", ('coupon',))
+                    row = cur.fetchone()
+                    balance_after = Decimal(str(row.get('balance') or 0)) if row else Decimal('0')
+                    cur.execute(
+                        """INSERT INTO account_flow (account_id, account_type, related_user, change_amount, balance_after, flow_type, remark, created_at)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())""",
+                        (None, 'coupon', user_id, Decimal('0'), balance_after, 'expense', f"用户使用优惠券 - 优惠券#{coupon_id}，抵扣金额¥{coupon_amount:.2f}")
                     )
 
-                    # 记录平台获得优惠券抵扣额（用于后续商户积分计算参考）
-                    self._insert_account_flow(
-                        account_type='coupon_revenue',
-                        related_user=PLATFORM_MERCHANT_ID,
-                        change_amount=coupon_amount,
-                        flow_type='income',
-                        remark=f"优惠券抵扣额记录 - 优惠券#{coupon_id}，用户{user_id}使用，金额¥{coupon_amount:.2f}"
+                    # 记录平台获得优惠券抵扣额（在当前事务内使用同一 cursor）
+                    cur.execute("SELECT balance FROM finance_accounts WHERE account_type = %s", ('coupon_revenue',))
+                    row2 = cur.fetchone()
+                    balance_after2 = Decimal(str(row2.get('balance') or 0)) if row2 else Decimal('0')
+                    cur.execute(
+                        """INSERT INTO account_flow (account_id, account_type, related_user, change_amount, balance_after, flow_type, remark, created_at)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())""",
+                        (None, 'coupon_revenue', PLATFORM_MERCHANT_ID, coupon_amount, balance_after2, 'income', f"优惠券抵扣额记录 - 优惠券#{coupon_id}，用户{user_id}使用，金额¥{coupon_amount:.2f}")
                     )
 
                     conn.commit()

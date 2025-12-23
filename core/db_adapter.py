@@ -3,6 +3,7 @@
 提供统一的数据库操作接口，支持命名参数和便捷的结果访问
 """
 from contextlib import contextmanager
+import logging
 from typing import Optional, Any, Dict, List
 from core.database import get_conn
 import pymysql
@@ -57,7 +58,25 @@ class PyMySQLAdapter:
         else:
             values = None
 
-        self._cursor.execute(sql, values)
+        logger = logging.getLogger(__name__)
+        logger.debug("Executing SQL: %s | params: %s", sql, values)
+        try:
+            self._cursor.execute(sql, values)
+        except (pymysql.err.InterfaceError, pymysql.err.OperationalError) as e:
+            # 连接可能已断开或游标已关闭，尝试重建连接并重试一次
+            logger.warning("DB execute failed, reconnecting and retrying: %s; SQL=%s; params=%s", e, sql, values)
+            try:
+                # 关闭已有资源并重建
+                self.close()
+                self._conn = get_conn().__enter__()
+                self._cursor = self._conn.cursor()
+                logger.debug("Retrying SQL after reconnect: %s | params: %s", sql, values)
+                self._cursor.execute(sql, values)
+            except Exception as e2:
+                # 若重试也失败，记录详细信息并抛出原始异常
+                logger.exception("DB retry failed: %s; SQL=%s; params=%s", e2, sql, values)
+                raise
+
         return ResultProxy(self._cursor)
 
     def _validate_sql(self, sql: str):
@@ -93,12 +112,21 @@ class PyMySQLAdapter:
     
     def close(self):
         """关闭连接"""
+        logger = logging.getLogger(__name__)
         if self._cursor:
-            self._cursor.close()
+            try:
+                self._cursor.close()
+            except Exception as e:
+                logger.debug("ignoring cursor.close() error: %s", e)
         if self._conn:
-            self._conn.close()
-            self._conn = None
-            self._cursor = None
+            try:
+                self._conn.close()
+            except Exception as e:
+                # pymysql may raise Error("Already closed") if connection was closed
+                logger.debug("ignoring conn.close() error: %s", e)
+            finally:
+                self._conn = None
+                self._cursor = None
     
     def __enter__(self):
         return self
