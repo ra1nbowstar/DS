@@ -4,7 +4,7 @@ from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 from core.database import get_conn
 from services.finance_service import split_order_funds
-from core.config import VALID_PAY_WAYS
+from core.config import VALID_PAY_WAYS, POINTS_DISCOUNT_RATE
 from core.table_access import build_dynamic_select, get_table_structure, _quote_identifier
 from decimal import Decimal
 import uuid
@@ -13,7 +13,8 @@ from enum import Enum
 import json
 import threading
 import time
-
+from core.logging import get_logger
+logger = get_logger(__name__)
 router = APIRouter()
 
 def _cancel_expire_orders():
@@ -252,11 +253,41 @@ class OrderManager:
         with get_conn() as conn:
             with conn.cursor() as cur:
                 select_fields = OrderManager._build_orders_select(cur)
-                cur.execute(f"SELECT {select_fields} FROM orders WHERE order_number = %s", (order_number,))
+
+    @staticmethod
+    def detail(order_number: str) -> Optional[dict]:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                # 1. 构造 orders 表字段（全部带 o. 前缀，避免歧义）
+                structure = get_table_structure(cur, "orders")
+                select_parts = []
+                for field in structure["fields"]:
+                    if field in structure["asset_fields"]:
+                        select_parts.append(
+                            f"COALESCE(o.{_quote_identifier(field)}, 0) AS {_quote_identifier(field)}"
+                        )
+                    else:
+                        select_parts.append(f"o.{_quote_identifier(field)}")
+
+                select_fields = ", ".join(select_parts)
+
+                # 2. 查询订单 + 用户
+                cur.execute(f"""
+                    SELECT 
+                        {select_fields},
+                        u.id     AS user_id,
+                        u.name   AS user_name,
+                        u.mobile AS user_mobile
+                    FROM orders o
+                    JOIN users u ON o.user_id = u.id
+                    WHERE o.order_number = %s
+                """, (order_number,))
                 order_info = cur.fetchone()
+
                 if not order_info:
                     return None
 
+                # 3. 商品明细
                 cur.execute("""
                     SELECT oi.*, p.name
                     FROM order_items oi
@@ -265,7 +296,27 @@ class OrderManager:
                 """, (order_info["id"],))
                 items = cur.fetchall()
 
-                addr = {
+                # 4. 用户信息（方案一：兜底手机号）
+                user_info = {
+                    "id": order_info.get("user_id"),
+                    "name": order_info.get("user_name"),
+                    "mobile": (
+                        order_info.get("user_mobile")
+                        or order_info.get("consignee_phone")
+                    )
+                }
+
+                # （推荐）清理 order_info 中的用户字段，避免语义混乱
+                for k in ["user_id", "user_name", "user_mobile"]:
+                    order_info.pop(k, None)
+
+                # 如果还有类似 "u.user_id" 这种异常 key，也一并清掉
+                for k in list(order_info.keys()):
+                    if "." in k:
+                        order_info.pop(k, None)
+
+                # 5. 地址信息（你原来的，保持不变）
+                address = {
                     "consignee_name": order_info.get("consignee_name"),
                     "consignee_phone": order_info.get("consignee_phone"),
                     "province": order_info.get("province"),
@@ -273,17 +324,22 @@ class OrderManager:
                     "district": order_info.get("district"),
                     "detail": order_info.get("shipping_address")
                 } if any(order_info.get(k) for k in (
-                    "consignee_name", "consignee_phone", "province",
-                    "city", "district", "shipping_address"
+                    "consignee_name",
+                    "consignee_phone",
+                    "province",
+                    "city",
+                    "district",
+                    "shipping_address"
                 )) else None
 
+                # 6. 最终返回
                 return {
                     "order_info": order_info,
-                    "address": addr,
+                    "user": user_info,
+                    "address": address,
                     "items": items,
-                    "specifications": order_info.get("refund_reason")  # 原样透出
+                    "specifications": order_info.get("refund_reason")
                 }
-
     @staticmethod
     def update_status(order_number: str, new_status: str, reason: Optional[str] = None) -> bool:
         with get_conn() as conn:
@@ -312,7 +368,8 @@ class OrderCreate(BaseModel):
 class OrderPay(BaseModel):
     order_number: str
     pay_way: str
-
+    coupon_id: Optional[int] = None  # 新增：使用的优惠券ID（如果有）
+    points_to_use: Optional[Decimal] = Decimal('0')
 class StatusUpdate(BaseModel):
     order_number: str
     new_status: str
@@ -357,7 +414,7 @@ def order_pay(body: OrderPay):
             total_amt = Decimal(str(order["total_amount"]))
             is_vip = bool(order["is_vip_item"])
 
-            # 2. 取订单里第一件商品作为结算主体（兼容现有逻辑）
+            # 2. 取订单里第一件商品作为结算主体
             cur.execute(
                 "SELECT product_id,quantity FROM order_items WHERE order_id=%s LIMIT 1",
                 (order["id"],)
@@ -366,23 +423,85 @@ def order_pay(body: OrderPay):
             if not item:
                 raise HTTPException(status_code=422, detail="订单无商品明细")
             product_id = item["product_id"]
-            quantity   = item["quantity"]
+            quantity = item["quantity"]
 
-            # 3. 财务结算（内部自带事务）
+            # 3. 处理优惠抵扣（积分 + 优惠券）
+            total_points_to_use = Decimal('0')
+            total_coupon_discount = Decimal('0')
+
+            # 3.1 处理积分抵扣
+            if body.points_to_use and body.points_to_use > 0:
+                # 查询用户积分余额
+                cur.execute(
+                    "SELECT COALESCE(member_points, 0) as points FROM users WHERE id = %s FOR UPDATE",
+                    (user_id,)
+                )
+                user = cur.fetchone()
+                if not user or Decimal(str(user['points'])) < body.points_to_use:
+                    raise HTTPException(status_code=400, detail="积分余额不足")
+
+                # 积分抵扣金额
+                points_discount = body.points_to_use * POINTS_DISCOUNT_RATE
+
+                # 校验：积分抵扣不能超过订单金额的50%
+                if points_discount > total_amt * Decimal('0.5'):
+                    raise HTTPException(status_code=400, detail="积分抵扣不能超过订单金额的50%")
+
+                total_points_to_use = body.points_to_use
+                logger.debug(f"用户{user_id}使用积分{total_points_to_use}分，抵扣金额¥{points_discount}")
+
+            # 3.2 处理优惠券抵扣
+            if body.coupon_id:
+                # 查询并锁定优惠券记录
+                cur.execute(
+                    """SELECT id, amount FROM coupons 
+                       WHERE id = %s AND user_id = %s AND status = 'unused' 
+                       FOR UPDATE""",
+                    (body.coupon_id, user_id)
+                )
+                coupon = cur.fetchone()
+
+                if not coupon:
+                    raise HTTPException(status_code=400, detail="优惠券不存在或已使用")
+
+                coupon_amount = Decimal(str(coupon['amount']))
+
+                # 将优惠券金额转换为等效积分数量
+                coupon_points = coupon_amount / POINTS_DISCOUNT_RATE if POINTS_DISCOUNT_RATE > 0 else Decimal('0')
+
+                # 标记优惠券为已使用
+                cur.execute(
+                    "UPDATE coupons SET status = 'used', used_at = NOW() WHERE id = %s",
+                    (body.coupon_id,)
+                )
+
+                # 累加到总积分抵扣
+                total_points_to_use += coupon_points
+                total_coupon_discount = coupon_amount
+
+                logger.debug(f"用户{user_id}使用优惠券#{body.coupon_id}: 金额¥{coupon_amount}, 等效积分{coupon_points}")
+
+            # 3.3 再次校验总抵扣金额不超过50%
+            total_discount = (total_points_to_use * POINTS_DISCOUNT_RATE) + total_coupon_discount
+            if total_discount > total_amt * Decimal('0.5'):
+                raise HTTPException(status_code=400, detail="总优惠金额不能超过订单金额的50%")
+
+            # 4. 财务结算（传入总积分抵扣量）
             fs = FinanceService()
-            # 普通商品可把积分抵扣除去，这里简化传 0
             fs.settle_order(
                 order_no=body.order_number,
                 user_id=user_id,
                 product_id=product_id,
                 quantity=quantity,
-                points_to_use=Decimal("0")
+                points_to_use=total_points_to_use  # 包含积分+优惠券的总额
             )
 
-            # 4. 更新订单状态
+            # 5. 更新订单状态
             ok = OrderManager.update_status(body.order_number, "pending_ship")
             if not ok:
                 raise HTTPException(status_code=500, detail="订单状态更新失败")
+
+            conn.commit()
 
     return {"ok": True}
 
