@@ -165,7 +165,7 @@ class OrderManager:
                 total = sum(Decimal(str(i["quantity"])) * Decimal(str(i["price"])) for i in items)
                 has_vip = any(i["is_vip"] for i in items)
                 order_number = datetime.now().strftime("%Y%m%d%H%M%S") + str(user_id) + str(uuid.uuid4().int)[:6]
-                init_status = "pending_recv" if delivery_way == "pickup" else "pending_pay"
+                init_status = "pending_pay"  # 统一待支付
 
                 cur.execute("""
                     INSERT INTO orders(
@@ -470,18 +470,15 @@ def order_pay(body: OrderPay):
         with conn.cursor() as cur:
             # 1. 取订单基本信息
             cur.execute(
-                "SELECT id,user_id,total_amount,status,is_vip_item FROM orders WHERE order_number=%s",
+                "SELECT id,user_id,total_amount,status,is_vip_item,delivery_way "
+                "FROM orders WHERE order_number=%s",
                 (body.order_number,)
             )
-            order = cur.fetchone()
-            if not order:
+            order_info = cur.fetchone()
+            if not order_info:
                 raise HTTPException(status_code=404, detail="订单不存在")
-            if order["status"] != "pending_pay":
+            if order_info["status"] != "pending_pay":
                 raise HTTPException(status_code=400, detail="订单状态不是待付款")
-
-            user_id = order["user_id"]
-            total_amt = Decimal(str(order["total_amount"]))
-            is_vip = bool(order["is_vip_item"])
 
             # 2. 获取order_id
             cur.execute("SELECT id FROM orders WHERE order_number=%s", (body.order_number,))
@@ -533,7 +530,8 @@ def order_pay(body: OrderPay):
             )
 
             # 5. 更新订单状态
-            ok = OrderManager.update_status(body.order_number, "pending_ship", external_conn=conn)
+            next_status = "pending_recv" if order_info["delivery_way"] == "pickup" else "pending_ship"
+            ok = OrderManager.update_status(body.order_number, next_status, external_conn=conn)
             if not ok:
                 raise HTTPException(status_code=500, detail="订单状态更新失败")
 
