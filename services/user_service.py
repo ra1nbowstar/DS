@@ -479,7 +479,7 @@ class UserService:
                     return 2
 
                 # 一星：3条直推 + 3条有效(C) + 团队累计≥20名六星(D)
-                elif direct_count >= 3 and valid_lines >= 3 and total_6star_count >= 20:
+                elif direct_count >= 3 and valid_lines >= 3 and total_6star_count >= 21:
                     return 1
 
                 return 0

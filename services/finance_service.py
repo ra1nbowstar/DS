@@ -277,6 +277,39 @@ class FinanceService:
                  new_balance, 'income', f"订单#{order_id} 平台收入¥{platform_revenue:.2f}")
             )
 
+            # 公司积分池增加：基于订单总额扣除积分抵扣后的基数的20%
+            try:
+                company_base = total_amount - points_discount
+                if company_base < Decimal('0'):
+                    company_base = Decimal('0')
+                company_points = (company_base * Decimal('0.20')).quantize(Decimal('0.0001'))
+
+                cur.execute(
+                    "UPDATE finance_accounts SET balance = balance + %s WHERE account_type = 'company_points'",
+                    (company_points,)
+                )
+                cur.execute("SELECT balance FROM finance_accounts WHERE account_type = %s", ('company_points',))
+                cp_row = cur.fetchone()
+                cp_new_balance = Decimal(str(cp_row['balance'] or 0))
+
+                cur.execute(
+                    """INSERT INTO account_flow (account_type, related_user, change_amount, balance_after, 
+                       flow_type, remark, created_at)
+                       VALUES (%s, %s, %s, %s, %s, %s, NOW())""",
+                    ('company_points', PLATFORM_MERCHANT_ID, company_points, cp_new_balance, 'income', f"订单#{order_id} 公司积分池+20% ¥{company_points:.4f}")
+                )
+                logger.debug(f"公司积分池增加: ¥{company_points:.4f}（订单#{order_id}）")
+                # 在积分流水中记录公司积分池的变动（便于积分报表追踪）
+                try:
+                    cur.execute(
+                        "INSERT INTO points_log (user_id, change_amount, balance_after, type, reason, related_order, created_at) VALUES (%s, %s, %s, %s, %s, %s, NOW())",
+                        (PLATFORM_MERCHANT_ID, company_points, cp_new_balance, 'company', f"订单#{order_id} 公司积分池增加", order_id)
+                    )
+                except Exception as e:
+                    logger.debug(f"写入 points_log（公司积分池）失败: {e}")
+            except Exception as e:
+                logger.error(f"更新公司积分池失败: {e}")
+
             # 10. 使用动态配置分配其他资金池（按 account_type 的 allocation）
             try:
                 pools_cfg = allocs
@@ -360,6 +393,14 @@ class FinanceService:
                       %s, %s, NOW())""",
             ('company_points', user_id, points_to_use, 'income', f"用户{user_id}积分抵扣转入")
         )
+        # 同步写入积分流水表，记录公司积分池的增加（设 user_id 为平台ID 以示系统入账）
+        try:
+            cur.execute(
+                "INSERT INTO points_log (user_id, change_amount, balance_after, type, reason, related_order, created_at) VALUES (%s, %s, (SELECT balance FROM finance_accounts WHERE account_type = 'company_points'), %s, %s, %s, NOW())",
+                (PLATFORM_MERCHANT_ID, points_to_use, 'company', f"用户{user_id}积分抵扣转入公司池", None)
+            )
+        except Exception as e:
+            logger.debug(f"写入 points_log（用户积分抵扣->公司池）失败: {e}")
 
     # ==================== 会员订单处理（v2版本） ====================
     # def _process_member_order_v2(self, cur, order_id: int, user_id: int, user,
@@ -533,34 +574,37 @@ class FinanceService:
                 logger.error(f"分配到池子 {atype} 失败: {e}")
 
     def _create_pending_rewards_v2(self, cur, order_id: int, buyer_id: int,
-                                   old_level: int, new_level: int,
-                                   single_price: Decimal, total_quantity: int) -> None:
+                               old_level: int, new_level: int,
+                               single_price: Decimal, total_quantity: int) -> None:
         """
         创建推荐和团队奖励（按升级层级逐层发放）
-
-        核心业务规则：
-        1. 推荐奖励：用户首次购买（0星→1星）且推荐人是星级会员（≥1星）时发放 1 次
-        2. 团队奖励：只为新达到的等级发放，例如2星→3星只发L3，0星→3星发L2和L3
-
-        关键修复：
-        - 增加订单级防重复检查
-        - 只为新达到的层级发放奖励（start_layer = max(old_level + 1, 2)）
+        
+        核心修复：
+        1. 构建完整推荐链（到MAX_TEAM_LAYER层），不限于目标层级
+        2. 跳过不满足条件的节点，继续向上查找满足条件的推荐人
+        3. 保持防重复检查和奖励发放原子性
+        
+        业务规则：
+        - 推荐奖励：用户首次购买（0星→1星）且推荐人≥1星时发放
+        - 团队奖励：只为新达到的层级发放，跳过不满足星级的节点向上查找
         """
         logger.info(f"开始发放奖励: 订单#{order_id}, 购买者={buyer_id}({old_level}→{new_level}星)")
-
+    
         # ==================== 防重复检查 ====================
         cur.execute(
             """SELECT id FROM account_flow 
-               WHERE account_type IN ('referral_points', 'team_reward_points') 
-               AND remark LIKE %s
-               LIMIT 1""",
+            WHERE account_type IN ('referral_points', 'team_reward_points') 
+            AND remark LIKE %s
+            LIMIT 1""",
             (f"%订单#{order_id}%",)
         )
         if cur.fetchone():
             logger.warning(f"⚠️ 订单#{order_id}的奖励已发放过，跳过重复发放")
             return
         # ===================================================
-
+        
+        total_distributed = Decimal('0')
+        
         # 1. 推荐奖励（首次购买 + 推荐人必须是星级会员）
         if old_level == 0:  # 只有0星升1星时才发推荐奖励
             cur.execute(
@@ -568,7 +612,7 @@ class FinanceService:
                 (buyer_id,)
             )
             referrer = cur.fetchone()
-
+            
             if referrer and referrer['referrer_id']:
                 cur.execute(
                     "SELECT member_level FROM users WHERE id = %s",
@@ -576,10 +620,10 @@ class FinanceService:
                 )
                 referrer_info = cur.fetchone()
                 referrer_level = referrer_info['member_level'] if referrer_info else 0
-
+                
                 if referrer_level >= 1:
                     reward_amount = single_price * Decimal('0.50')
-
+                    
                     # 发放到 referral_points
                     cur.execute(
                         "UPDATE users SET referral_points = COALESCE(referral_points, 0) + %s WHERE id = %s",
@@ -590,166 +634,166 @@ class FinanceService:
                         "UPDATE users SET true_total_points = true_total_points + %s WHERE id = %s",
                         (reward_amount, referrer['referrer_id'])
                     )
-
+                    
                     # 记录流水
                     cur.execute(
                         "SELECT COALESCE(referral_points, 0) AS referral_points FROM users WHERE id = %s",
                         (referrer['referrer_id'],)
                     )
                     new_balance = Decimal(str(cur.fetchone()['referral_points'] or 0))
-
+                    
                     cur.execute(
                         """INSERT INTO account_flow (account_type, related_user, change_amount, balance_after, 
-                           flow_type, remark, created_at)
-                           VALUES (%s, %s, %s, %s, %s, %s, NOW())""",
+                        flow_type, remark, created_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, NOW())""",
                         ('referral_points', referrer['referrer_id'], reward_amount,
-                         new_balance, 'income', f"推荐奖励 - 订单#{order_id}")
+                        new_balance, 'income', f"推荐奖励 - 订单#{order_id}")
                     )
-
+                    
                     logger.info(f"推荐奖励发放: 用户{referrer['referrer_id']}({referrer_level}星) +{reward_amount:.2f}")
+                    total_distributed += reward_amount
                 else:
                     logger.debug(f"推荐人{referrer['referrer_id']}不是星级会员({referrer_level}星)，不发放推荐奖励")
             else:
                 logger.debug("购买者无推荐人，跳过推荐奖励")
-
+        
         # 2. 团队奖励（只为新达到的层级发放）
         if new_level <= max(old_level, 1):
             logger.debug("等级未提升或保持1星，不产生团队奖励")
             return
-
+        
         # ==================== 关键修复：计算新达到的层级范围 ====================
-        # 例如：2星→3星，只发放L3奖励；0星→3星，发放L2和L3奖励
         start_layer = max(old_level + 1, 2)
         logger.debug(f"发放团队奖励层级范围: L{start_layer}-L{new_level}")
         # ========================================================================
-
+        
+        # ==================== 核心修复：构建完整推荐链 ============================
+        # 错误版：for current_layer in range(1, target_layer + 1):  # 只构建到目标层级
+        # 正确版：构建到MAX_TEAM_LAYER层，确保能向上追溯
+        current_id = buyer_id
+        referrer_chain = []  # 存储完整的推荐链
+        
+        for current_layer in range(1, MAX_TEAM_LAYER + 1):
+            cur.execute(
+                "SELECT referrer_id FROM user_referrals WHERE user_id = %s",
+                (current_id,)
+            )
+            ref = cur.fetchone()
+            
+            if not ref or not ref['referrer_id']:
+                logger.debug(f"第{current_layer}层无推荐人，链断裂")
+                break
+            
+            referrer_id = ref['referrer_id']
+            cur.execute("SELECT member_level FROM users WHERE id = %s", (referrer_id,))
+            user_row = cur.fetchone()
+            referrer_level = user_row.get('member_level', 0) if user_row else 0
+            
+            referrer_chain.append({
+                'layer': current_layer,
+                'user_id': referrer_id,
+                'member_level': referrer_level
+            })
+            
+            logger.debug(f"第{current_layer}层: 用户{referrer_id}({referrer_level}星)")
+            current_id = referrer_id  # 继续向上
+        
+        if not referrer_chain:
+            logger.debug("推荐链为空，无法发放团队奖励")
+            return
+        # ========================================================================
+        
+        # ==================== 核心修复：跳过不满足节点向上查找 =====================
         for target_layer in range(start_layer, new_level + 1):
-            # 第一步：构建完整的推荐链（从第1层到第target_layer层）
-            current_id = buyer_id
-            referrer_chain = []
-
-            logger.debug(f"构建第{target_layer}层推荐链...")
-
-            for current_layer in range(1, target_layer + 1):
-                cur.execute(
-                    "SELECT referrer_id FROM user_referrals WHERE user_id = %s",
-                    (current_id,)
-                )
-                ref = cur.fetchone()
-
-                if not ref or not ref['referrer_id']:
-                    logger.debug(f"第{current_layer}层无推荐人，链断裂")
-                    break
-
-                referrer_id = ref['referrer_id']
-                cur.execute("SELECT member_level FROM users WHERE id = %s", (referrer_id,))
-                user_row = cur.fetchone()
-                referrer_level = user_row['member_level'] if user_row else 0
-
-                referrer_chain.append({
-                    'layer': current_layer,
-                    'user_id': referrer_id,
-                    'member_level': referrer_level
-                })
-
-                logger.debug(f"第{current_layer}层: 用户{referrer_id}({referrer_level}星)")
-                current_id = referrer_id
-
-            # 如果链的长度不足，跳过此层级
-            if len(referrer_chain) < target_layer:
-                logger.debug(f"推荐链仅{len(referrer_chain)}层，不足{target_layer}层，跳过")
-                continue
-
-            # 第二步：从第target_layer层开始向上查找满足条件的推荐人
             reward_recipient = None
-
-            logger.debug(f"查找满足{target_layer}星的推荐人...")
-
-            for i in range(target_layer - 1, -1, -1):
-                candidate = referrer_chain[i]
-                candidate_id = candidate['user_id']
-                candidate_level = candidate['member_level']
-                candidate_layer = candidate['layer']
-
-                if candidate_level >= target_layer:
+            
+            # 在完整推荐链中查找满足条件的最接近的推荐人
+            for candidate in referrer_chain:
+                # 只考虑不超过目标层级的推荐人（避免L1用户拿L3奖励的逻辑错误）
+                if candidate['layer'] > target_layer:
+                    continue
+                
+                if candidate['member_level'] >= target_layer:
+                    # 找到第一个满足条件的用户（按层数从小到大）
                     reward_recipient = {
-                        'user_id': candidate_id,
-                        'actual_layer': candidate_layer
+                        'user_id': candidate['user_id'],
+                        'actual_layer': candidate['layer'],
+                        'member_level': candidate['member_level']
                     }
-                    logger.debug(f"找到满足条件的推荐人: 用户{candidate_id}（第{candidate_layer}层，{candidate_level}星）")
+                    logger.debug(f"找到满足条件的推荐人: 用户{candidate['user_id']}（第{candidate['layer']}层，{candidate['member_level']}星）")
                     break
-                else:
-                    logger.debug(
-                        f"用户{candidate_id}（第{candidate_layer}层，{candidate_level}星）不满足{target_layer}星，继续向上")
-
-            # 第三步：发放奖励
-            if reward_recipient:
-                recipient_id = reward_recipient['user_id']
-                actual_layer = reward_recipient['actual_layer']
-
-                reward_amount = single_price * Decimal('0.50')
-
-                # 发放到 team_reward_points
-                cur.execute(
-                    "UPDATE users SET team_reward_points = COALESCE(team_reward_points, 0) + %s WHERE id = %s",
-                    (reward_amount, recipient_id)
-                )
-                # 更新 true_total_points
-                cur.execute(
-                    "UPDATE users SET true_total_points = true_total_points + %s WHERE id = %s",
-                    (reward_amount, recipient_id)
-                )
-
-                # 记录流水
-                cur.execute(
-                    "SELECT COALESCE(team_reward_points, 0) AS team_reward_points FROM users WHERE id = %s",
-                    (recipient_id,)
-                )
-                new_balance = Decimal(str(cur.fetchone()['team_reward_points'] or 0))
-
-                cur.execute(
-                    """INSERT INTO account_flow (account_type, related_user, change_amount, balance_after, 
-                       flow_type, remark, created_at)
-                       VALUES (%s, %s, %s, %s, %s, %s, NOW())""",
-                    ('team_reward_points', recipient_id, reward_amount,
-                     new_balance, 'income', f"团队L{target_layer}奖励（来自第{actual_layer}层）- 订单#{order_id}")
-                )
-
-                logger.info(
-                    f"团队奖励发放: 用户{recipient_id}（第{actual_layer}层）获得L{target_layer}奖励 {reward_amount:.2f}")
-            else:
+            
+            if not reward_recipient:
                 logger.debug(f"第{target_layer}层无满足星级{target_layer}的推荐人，跳过")
+                continue
+            
+            # ==================== 发放奖励 ====================
+            recipient_id = reward_recipient['user_id']
+            actual_layer = reward_recipient['actual_layer']
+            
+            reward_amount = single_price * Decimal('0.50')
+            
+            # 发放到 team_reward_points
+            cur.execute(
+                "UPDATE users SET team_reward_points = COALESCE(team_reward_points, 0) + %s WHERE id = %s",
+                (reward_amount, recipient_id)
+            )
+            # 更新 true_total_points
+            cur.execute(
+                "UPDATE users SET true_total_points = true_total_points + %s WHERE id = %s",
+                (reward_amount, recipient_id)
+            )
+            
+            # 记录流水
+            cur.execute(
+                "SELECT COALESCE(team_reward_points, 0) AS team_reward_points FROM users WHERE id = %s",
+                (recipient_id,)
+            )
+            new_balance = Decimal(str(cur.fetchone()['team_reward_points'] or 0))
+            
+            cur.execute(
+                """INSERT INTO account_flow (account_type, related_user, change_amount, balance_after, 
+                flow_type, remark, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s, NOW())""",
+                ('team_reward_points', recipient_id, reward_amount,
+                new_balance, 'income', f"团队L{target_layer}奖励（来自第{actual_layer}层）- 订单#{order_id}")
+            )
+            
+            total_distributed += reward_amount
+            logger.info(f"团队奖励发放: 用户{recipient_id}（第{actual_layer}层）获得L{target_layer}奖励 {reward_amount:.2f}")
+        
+        logger.info(f"奖励发放完成: 订单#{order_id}共发放{total_distributed:.2f}点数")
 
-    def _create_order(self, order_no: str, user_id: int, merchant_id: int,
-                      product_id: int, total_amount: Decimal, original_amount: Decimal,
-                      points_discount: Decimal, is_member: bool) -> int:
-        # 关键修改：字段名 order_number
-        result = self.session.execute(
-            """INSERT INTO orders (order_number, user_id, merchant_id, total_amount, original_amount, points_discount, is_member_order, status)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, 'completed')""",
-            {
-                "order_number": order_no,
-                "user_id": user_id,
-                "merchant_id": merchant_id,
-                "total_amount": total_amount,
-                "original_amount": original_amount,
-                "points_discount": points_discount,
-                "is_member": is_member
-            }
-        )
-        order_id = result.lastrowid
+        def _create_order(self, order_no: str, user_id: int, merchant_id: int,
+                        product_id: int, total_amount: Decimal, original_amount: Decimal,
+                        points_discount: Decimal, is_member: bool) -> int:
+            # 关键修改：字段名 order_number
+            result = self.session.execute(
+                """INSERT INTO orders (order_number, user_id, merchant_id, total_amount, original_amount, points_discount, is_member_order, status)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, 'completed')""",
+                {
+                    "order_number": order_no,
+                    "user_id": user_id,
+                    "merchant_id": merchant_id,
+                    "total_amount": total_amount,
+                    "original_amount": original_amount,
+                    "points_discount": points_discount,
+                    "is_member": is_member
+                }
+            )
+            order_id = result.lastrowid
 
-        self.session.execute(
-            """INSERT INTO order_items (order_id, product_id, quantity, unit_price, total_price)
-                    VALUES (%s, %s, 1, %s, %s)""",
-            {
-                "order_id": order_id,
-                "product_id": product_id,
-                "unit_price": original_amount,
-                "total_price": original_amount
-            }
-        )
-        return order_id
+            self.session.execute(
+                """INSERT INTO order_items (order_id, product_id, quantity, unit_price, total_price)
+                        VALUES (%s, %s, 1, %s, %s)""",
+                {
+                    "order_id": order_id,
+                    "product_id": product_id,
+                    "unit_price": original_amount,
+                    "total_price": original_amount
+                }
+            )
+            return order_id
 
     # ==================== 关键修改3：member_points积分发放 ====================
     def _allocate_funds_to_pools(self, order_id: int, total_amount: Decimal) -> None:
@@ -2012,6 +2056,13 @@ class FinanceService:
                     FROM user_unilevel uu
                     JOIN users u ON uu.user_id = u.id
                     WHERE uu.level IN (1, 2, 3)
+                    AND EXISTS (
+                        SELECT 1 FROM orders o
+                        WHERE o.user_id = uu.user_id
+                          AND o.status IN ('pending_ship','pending_recv','completed')
+                          AND o.created_at >= DATE_FORMAT(CURDATE(), '%%Y-%%m-01')
+                          AND o.created_at < DATE_ADD(DATE_FORMAT(CURDATE(), '%%Y-%%m-01'), INTERVAL 1 MONTH)
+                    )
                 """)
                 unilevel_users = cur.fetchall()
 
@@ -2117,6 +2168,13 @@ class FinanceService:
                     FROM user_unilevel uu
                     JOIN users u ON uu.user_id = u.id
                     WHERE uu.level IN (1, 2, 3)
+                    AND EXISTS (
+                        SELECT 1 FROM orders o
+                        WHERE o.user_id = uu.user_id
+                          AND o.status IN ('pending_ship','pending_recv','completed')
+                          AND o.created_at >= DATE_FORMAT(CURDATE(), '%%Y-%%m-01')
+                          AND o.created_at < DATE_ADD(DATE_FORMAT(CURDATE(), '%%Y-%%m-01'), INTERVAL 1 MONTH)
+                    )
                 """)
                 unilevel_users = cur.fetchall()
 
