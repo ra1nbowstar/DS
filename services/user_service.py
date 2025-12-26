@@ -478,8 +478,8 @@ class UserService:
                         all(count >= 10 for count in lines_6star_counts[:5]):
                     return 2
 
-                # 一星：3条直推 + 3条有效(C) + 团队累计≥30名六星(D)
-                elif direct_count >= 3 and valid_lines >= 3 and total_6star_count >= 30:
+                # 一星：3条直推 + 3条有效(C) + 团队累计≥20名六星(D)
+                elif direct_count >= 3 and valid_lines >= 3 and total_6star_count >= 20:
                     return 1
 
                 return 0

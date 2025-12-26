@@ -550,8 +550,14 @@ async def get_pool_allocations(
     """获取当前资金池分配配置"""
     try:
         allocs = service.get_pool_allocations()
-        # 将 Decimal 转换为字符串以避免序列化问题
-        data = {k: str(v) for k, v in allocs.items()}
+        # 同时查询每个资金池的当前余额，并构建返回结构
+        data = {}
+        for k, v in allocs.items():
+            try:
+                balance = service.get_account_balance(k)
+            except Exception:
+                balance = None
+            data[k] = {"allocation": str(v), "balance": float(balance) if balance is not None else None}
         return ResponseModel(success=True, message="ok", data=data)
     except Exception as e:
         logger.error(f"获取资金池配置失败: {e}", exc_info=True)
