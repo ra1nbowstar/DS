@@ -95,13 +95,14 @@ def update_system_sentences(payload: SystemSentenceUpdate):
                         update_fields.append("system_sentence = %s")
                         update_params.append(payload.system_sentence)
                     
-                    if update_fields:
-                        update_params.append(existing["id"])
-                        cur.execute(f"""
-                            UPDATE system_sentence
-                            SET {', '.join(update_fields)}, updated_at = NOW()
-                            WHERE id = %s
-                        """, tuple(update_params))
+                        if update_fields:
+                            from core.table_access import build_select_list
+                            update_params.append(existing["id"])
+                            cur.execute(f"""
+                                UPDATE system_sentence
+                                SET {build_select_list(update_fields)}, updated_at = NOW()
+                                WHERE id = %s
+                            """, tuple(update_params))
                         conn.commit()
                         
                         # 查询更新后的记录

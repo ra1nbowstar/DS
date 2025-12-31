@@ -3,7 +3,8 @@ import bcrypt
 from typing import Optional, Dict, Any
 from enum import IntEnum
 from core.database import get_conn
-from core.table_access import build_dynamic_select, _quote_identifier
+from core.table_access import build_dynamic_select, _quote_identifier, build_select_list
+from core.db_adapter import build_in_placeholders
 import string
 import random
 from core.logging import get_logger
@@ -499,7 +500,8 @@ class UserService:
         if not line_ids:
             return 0
 
-        union_parts = " UNION ALL ".join([f"SELECT {uid} as user_id" for uid in line_ids])
+        union_parts = " UNION ALL ".join(["SELECT %s as user_id"] * len(line_ids))
+        params_tuple = tuple(line_ids)
 
         cur.execute(f"""
             WITH RECURSIVE all_teams AS (
@@ -535,7 +537,7 @@ class UserService:
             SELECT COUNT(*) as valid_count
             FROM line_stats
             WHERE has_valid_6star = TRUE
-        """)
+        """, params_tuple)
         return cur.fetchone()['valid_count'] or 0
 
     @staticmethod
@@ -916,7 +918,7 @@ class UserService:
 
                 # 执行查询
                 sql = f"""
-                    SELECT {', '.join(select_fields)}
+                    SELECT {build_select_list(select_fields)}
                     FROM users
                     WHERE id = %s
                 """

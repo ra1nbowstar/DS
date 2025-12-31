@@ -32,6 +32,34 @@ def to_pinyin(text: str) -> str:
     return " ".join(lazy_pinyin(text, style=Style.NORMAL)).upper()
 
 
+def _validate_placeholder_count(sql_fragment: Optional[str], params: List[Any]):
+    """简单校验：确保 SQL 片段中的 `%s` 占位符数量与 params 数量一致。
+
+    这可以捕获将用户输入直接拼接进 SQL 的错误使用情形。
+    """
+    if not sql_fragment:
+        return
+    placeholder_count = sql_fragment.count("%s")
+    if placeholder_count != len(params):
+        raise HTTPException(status_code=400, detail=f"SQL 占位符数量({placeholder_count})与参数数量({len(params)})不匹配")
+
+
+def _safe_concat_or(conds: List[str]) -> str:
+    """安全地将多个条件用 OR 连接。
+
+    校验每个条件是否为字符串且不包含明显的注入标记（`;`, `--`, `/*`, `*/`），
+    然后返回以 ` OR ` 连接的字符串。仅用于连接已经由代码构造的条件片段。
+    """
+    if not conds:
+        return ""
+    for c in conds:
+        if not isinstance(c, str):
+            raise HTTPException(status_code=400, detail="非法的SQL条件类型")
+        if ";" in c or "--" in c or "/*" in c or "*/" in c:
+            raise HTTPException(status_code=400, detail="检测到不安全的SQL片段")
+    return " OR ".join(conds)
+
+
 # ✅ 新增：处理可选文件上传的依赖函数
 def get_optional_files(files: Optional[List[UploadFile]] = File(None)) -> Optional[List[UploadFile]]:
     """
@@ -241,10 +269,14 @@ def search_products(
                 params.append(word_pattern)
 
                 # 每个词至少匹配一个字段
-                conditions.append(f"({' OR '.join(word_conditions)})")
+                # 使用安全的 OR 拼接，避免将字段名/表达式交由 build_select_list 处理
+                conditions.append("(" + _safe_concat_or(word_conditions) + ")")
 
             # 所有词必须同时命中
             where_clause = " AND ".join(conditions)
+
+            # 验证占位符数量与参数数量一致（防止不安全拼接）
+            _validate_placeholder_count(where_clause, params)
 
             # 构建排序：同时命中全部词的置顶（通过计算匹配的字段数）
             # 简化版：按商品ID排序，实际可以优化为按匹配度排序
@@ -327,6 +359,10 @@ def get_all_products(
                 params.append(user_id)
 
             where_sql = " WHERE " + " AND ".join(where_clauses) if where_clauses else ""
+
+            # 验证占位符数量与参数数量一致（防止不安全拼接）
+            if where_clauses:
+                _validate_placeholder_count(" AND ".join(where_clauses), params)
 
             # 查询总数
             count_sql = f"SELECT COUNT(*) as total FROM products{where_sql}"
@@ -566,10 +602,11 @@ def update_product(id: int, payload: ProductUpdate):
 
                 # 更新商品基本信息
                 if update_fields:
+                    from core.table_access import build_select_list
                     update_params.append(id)
                     cur.execute(f"""
                         UPDATE products 
-                        SET {', '.join(update_fields)}, updated_at = NOW()
+                        SET {build_select_list(update_fields)}, updated_at = NOW()
                         WHERE id = %s
                     """, tuple(update_params))
 
@@ -618,9 +655,10 @@ def update_product(id: int, payload: ProductUpdate):
                                 raise HTTPException(status_code=400, detail=f"SKU ID {sku_update.id} 不属于商品 {id}")
 
                             sku_params.extend([sku_update.id, id])
+                            from core.table_access import build_select_list
                             cur.execute(f"""
                                 UPDATE product_skus 
-                                SET {', '.join(sku_fields)}, updated_at = NOW()
+                                SET {build_select_list(sku_fields)}, updated_at = NOW()
                                 WHERE id = %s AND product_id = %s
                             """, tuple(sku_params))
 

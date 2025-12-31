@@ -18,6 +18,7 @@ from services.points_service import add_points
 from services.reward_service import TeamRewardService
 from services.director_service import DirectorService
 from services.wechat_service import WechatService
+from core.table_access import build_select_list
 from typing import List
 
 
@@ -371,7 +372,7 @@ def upgrade(mobile: str):
             args.append(new_level)
             if "level_changed_at" in cols:
                 set_parts.append(f"{_quote_identifier('level_changed_at')}=NOW()")
-            sql = f"UPDATE users SET {', '.join(set_parts)} WHERE id=%s"
+            sql = f"UPDATE users SET {build_select_list(set_parts)} WHERE id=%s"
             args.append(user_id)          # 最后一个占位符
             cur.execute(sql, tuple(args)) # 参数数量 = 占位符数量
 
@@ -1025,8 +1026,9 @@ def points_log(mobile: str, points_type: str = "member", page: int = 1, size: in
             
             where, args = ["user_id=%s", "type=%s"], [u["id"], points_type]  # 修改为正确的列名 type
             sql_where = " AND ".join(where)
+
             sql = f"""
-                SELECT {', '.join(select_fields)}
+                SELECT {build_select_list(select_fields)}
                 FROM {_quote_identifier('points_log')}
                 WHERE {sql_where}
                 ORDER BY created_at DESC

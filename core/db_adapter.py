@@ -79,16 +79,126 @@ class PyMySQLAdapter:
 
         return ResultProxy(self._cursor)
 
-    def _validate_sql(self, sql: str):
+    def _validate_sql(self, sql: str, allow_comments: bool = False):
         """对即将执行的 SQL 做简单安全校验，拒绝多语句和注释。
 
         说明：此校验为防御层之一，不能替代参数化查询和标识符白名单。
         """
         if not isinstance(sql, str):
             raise ValueError("sql must be a string")
-        # 禁止分号（避免多语句）、行注释和块注释
-        if ";" in sql or "--" in sql or "/*" in sql or "*/" in sql:
-            raise ValueError("unsafe SQL detected")
+        # 默认严格模式：若不允许注释，则直接拒绝包含注释或分号的 SQL
+        if not allow_comments:
+            if ";" in sql or "--" in sql or "/*" in sql or "*/" in sql:
+                raise ValueError("unsafe SQL detected")
+
+        # 放宽模式：允许注释存在但仍需拒绝多语句。
+        # 我们通过去除注释（忽略字符串内部的注释标记）并检查分号是否出现在字符串之外来实现。
+        # 如果允许注释，则执行如下更精确的检查；否则已在上面严格拒绝。
+        if allow_comments:
+            s = sql
+            if not s:
+                return
+
+            # 去除注释（保留字符串字面量），实现同上
+            i = 0
+            n = len(s)
+            cleaned_chars = []
+            in_squote = False
+            in_dquote = False
+            in_line_comment = False
+            in_block_comment = False
+
+            while i < n:
+                ch = s[i]
+                if in_line_comment:
+                    if ch == '\n':
+                        in_line_comment = False
+                        cleaned_chars.append(ch)
+                    i += 1
+                    continue
+                if in_block_comment:
+                    if ch == '*' and i + 1 < n and s[i+1] == '/':
+                        in_block_comment = False
+                        i += 2
+                    else:
+                        i += 1
+                    continue
+                if in_squote:
+                    if ch == "'":
+                        if i + 1 < n and s[i+1] == "'":
+                            cleaned_chars.append("''")
+                            i += 2
+                            continue
+                        else:
+                            in_squote = False
+                    cleaned_chars.append(ch)
+                    i += 1
+                    continue
+                if in_dquote:
+                    if ch == '"':
+                        if i + 1 < n and s[i+1] == '"':
+                            cleaned_chars.append('""')
+                            i += 2
+                            continue
+                        else:
+                            in_dquote = False
+                    cleaned_chars.append(ch)
+                    i += 1
+                    continue
+                if ch == '-' and i + 1 < n and s[i+1] == '-':
+                    in_line_comment = True
+                    i += 2
+                    continue
+                if ch == '/' and i + 1 < n and s[i+1] == '*':
+                    in_block_comment = True
+                    i += 2
+                    continue
+                if ch == "'":
+                    in_squote = True
+                    cleaned_chars.append(ch)
+                    i += 1
+                    continue
+                if ch == '"':
+                    in_dquote = True
+                    cleaned_chars.append(ch)
+                    i += 1
+                    continue
+                cleaned_chars.append(ch)
+                i += 1
+
+            cleaned = ''.join(cleaned_chars)
+
+            # 检查分号是否出现在字符串之外
+            i = 0
+            n = len(cleaned)
+            in_squote = in_dquote = False
+            while i < n:
+                ch = cleaned[i]
+                if in_squote:
+                    if ch == "'":
+                        if i + 1 < n and cleaned[i+1] == "'":
+                            i += 2
+                            continue
+                        else:
+                            in_squote = False
+                    i += 1
+                    continue
+                if in_dquote:
+                    if ch == '"':
+                        if i + 1 < n and cleaned[i+1] == '"':
+                            i += 2
+                            continue
+                        else:
+                            in_dquote = False
+                    i += 1
+                    continue
+                if ch == "'":
+                    in_squote = True
+                elif ch == '"':
+                    in_dquote = True
+                elif ch == ';':
+                    raise ValueError("unsafe SQL detected")
+                i += 1
     
     def _convert_sql_params(self, sql: str, params: Dict[str, Any]) -> tuple:
         """将命名参数格式 `:param` 转换为 PyMySQL 的 `%s` 格式，并返回转换后的 SQL 和参数元组"""

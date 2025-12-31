@@ -92,6 +92,24 @@ def _quote_identifier(name: str) -> str:
     raise ValueError(f"invalid identifier: {name}")
 
 
+def build_select_list(fields: List[str]) -> str:
+    """构造 SELECT 字段列表。
+
+    对于简单的标识符会使用 `_quote_identifier` 进行引用；对于包含表达式、函数调用、别名或已经引用的字段，保留原样。
+    规则：如果字段字符串包含空格、左括号、反引号或 AS(大小写不限)，则认为是表达式并保留原样；否则按标识符处理。
+    """
+    parts: List[str] = []
+    for f in fields:
+        if not isinstance(f, str):
+            raise ValueError("select fields must be strings")
+        low = f.lower()
+        if " " in f or "(" in f or "`" in f or " as " in low:
+            parts.append(f)
+        else:
+            parts.append(_quote_identifier(f))
+    return ", ".join(parts)
+
+
 def build_select_sql(table_name: str, structure: Dict[str, any], 
                      where_clause: Optional[str] = None,
                      order_by: Optional[str] = None,
@@ -137,7 +155,7 @@ def build_select_sql(table_name: str, structure: Dict[str, any],
             select_parts.append(_quote_identifier(field))
     
     # 引用表名
-    sql = f"SELECT {', '.join(select_parts)} FROM {_quote_identifier(table_name)}"
+    sql = f"SELECT {build_select_list(select_parts)} FROM {_quote_identifier(table_name)}"
     
     if where_clause:
         # where_clause 可能包含参数占位符，仍然允许使用占位符，但禁止分号等附加语句

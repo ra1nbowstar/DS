@@ -36,7 +36,9 @@ def scan_file(path: pathlib.Path):
 
 def main():
     print(f"Scanning {ROOT} for suspicious IN-list patterns...")
-    files = list(ROOT.rglob('*.py'))
+    # 排除路径：虚拟环境、site-packages、缓存、构建目录等，减少第三方库误报
+    exclude_parts = {'.venv', 'venv', 'site-packages', '__pycache__', 'node_modules', 'dist', 'build'}
+    files = [p for p in ROOT.rglob('*.py') if not any(part in exclude_parts for part in p.parts)]
     total = 0
     for file in files:
         rel = file.relative_to(ROOT)

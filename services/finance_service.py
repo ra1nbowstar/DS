@@ -22,6 +22,7 @@ from core.db_adapter import PyMySQLAdapter
 from core.exceptions import FinanceException, OrderException, InsufficientBalanceException
 from core.logging import get_logger
 from core.table_access import build_dynamic_select, get_table_structure, _quote_identifier
+from core.table_access import build_dynamic_select, get_table_structure, _quote_identifier, build_select_list
 from core.db_adapter import build_in_placeholders
 
 logger = get_logger(__name__)
@@ -849,9 +850,11 @@ class FinanceService:
         if not reward_ids:
             raise FinanceException("奖励ID列表不能为空")
 
-        placeholders = ','.join(['%s'] * len(reward_ids))
-
         # ============= 关键修复：移除 try...except，让 FinanceException 直接抛出 =============
+        # 使用核心库中的占位符构造器，避免直接拼接值到 SQL
+        placeholders, params_dict = build_in_placeholders(reward_ids)
+        params_tuple = tuple(params_dict[f"id{i}"] for i in range(len(reward_ids)))
+
         with get_conn() as conn:
             with conn.cursor() as cur:
                 # 查询待审核奖励
@@ -859,7 +862,7 @@ class FinanceService:
                     f"""SELECT id, user_id, reward_type, amount, order_id, layer
                        FROM pending_rewards 
                        WHERE id IN ({placeholders}) AND status = 'pending'""",
-                    reward_ids
+                    params_tuple
                 )
                 rewards = cur.fetchall()
 
@@ -1445,7 +1448,7 @@ class FinanceService:
                     raise FinanceException("提现记录不存在或已处理")
 
                 # 读取记录以便后续处理（短查询）
-                cur.execute(f"SELECT {', '.join(select_fields)} FROM withdrawals WHERE id = %s", (withdrawal_id,))
+                cur.execute(f"SELECT {build_select_list(select_fields)} FROM withdrawals WHERE id = %s", (withdrawal_id,))
                 withdraw = cur.fetchone()
 
                 if approve:
@@ -1646,10 +1649,11 @@ class FinanceService:
                 except Exception:
                     logger.debug("检查 finance_accounts.config_params 列时出错，继续尝试读取行")
 
-                # 查询表中与我们关心的 account_type 列表匹配的行
-                placeholders = ','.join(['%s'] * len(account_keys))
+                # 查询表中与我们关心的 account_type 列表匹配的行（使用安全占位符构造）
                 try:
-                    cur.execute(f"SELECT account_type, config_params FROM finance_accounts WHERE account_type IN ({placeholders})", tuple(account_keys))
+                    placeholders, params_dict = build_in_placeholders(account_keys)
+                    params_tuple = tuple(params_dict[f"id{i}"] for i in range(len(account_keys)))
+                    cur.execute(f"SELECT account_type, config_params FROM finance_accounts WHERE account_type IN ({placeholders})", params_tuple)
                     rows = cur.fetchall()
                 except Exception as e:
                     logger.error(f"读取 finance_accounts 行失败: {e}")
@@ -2080,7 +2084,7 @@ class FinanceService:
                         select_fields.append(_quote_identifier(field_name))
 
                 # 动态构造 SELECT 语句
-                select_sql = f"SELECT {', '.join(select_fields)} FROM {_quote_identifier('finance_accounts')}"
+                select_sql = f"SELECT {build_select_list(select_fields)} FROM {_quote_identifier('finance_accounts')}"
                 cur.execute(select_sql)
                 pools = cur.fetchall()
 
@@ -2154,7 +2158,7 @@ class FinanceService:
                     else:
                         select_parts.append(_quote_identifier(field))
 
-                sql = f"SELECT {', '.join(select_parts)} FROM {_quote_identifier('account_flow')} ORDER BY created_at DESC LIMIT %s"
+                sql = f"SELECT {build_select_list(select_parts)} FROM {_quote_identifier('account_flow')} ORDER BY created_at DESC LIMIT %s"
                 cur.execute(sql, (limit,))
                 flows = cur.fetchall()
 
@@ -2635,7 +2639,7 @@ class FinanceService:
 
                 # 构造完整的 SELECT 语句
                 params = [limit]
-                sql = f"""SELECT {', '.join(select_fields)}
+                sql = f"""SELECT {build_select_list(select_fields)}
                          FROM weekly_subsidy_records wsr 
                          LEFT JOIN users u ON wsr.user_id = u.id"""
                 if user_id:
@@ -4558,11 +4562,12 @@ class FinanceService:
                 orders = cur.fetchall()
 
                 # 4. 查询每个订单的积分数据
-                order_ids = [str(order['order_id']) for order in orders]
+                order_ids = [order['order_id'] for order in orders]
                 order_addons_map = {}
 
                 if order_ids:
-                    placeholders = ','.join(['%s'] * len(order_ids))
+                    placeholders, params_dict = build_in_placeholders(order_ids)
+                    params_tuple = tuple(params_dict[f"id{i}"] for i in range(len(order_ids)))
 
                     # 仅查询积分流水
                     cur.execute(f"""
@@ -4574,7 +4579,7 @@ class FinanceService:
                         FROM points_log pl
                         WHERE pl.related_order IN ({placeholders})
                         GROUP BY pl.related_order
-                    """, tuple(order_ids))
+                    """, params_tuple)
 
                     for row in cur.fetchall():
                         order_addons_map[row['related_order']] = {
@@ -4612,25 +4617,25 @@ class FinanceService:
                         FROM points_log
                         WHERE type = 'member' AND change_amount > 0
                           AND related_order IN ({placeholders})
-                    """, tuple(order_ids))
+                    """, params_tuple)
                     total_user_points = cur.fetchone()['total_user_points'] or 0
 
                     # 总抵扣积分
                     cur.execute(f"""
-                        SELECT SUM(ABS(change_amount)) as total_deducted_points
-                        FROM points_log
-                        WHERE type = 'member' AND change_amount < 0
-                          AND related_order IN ({placeholders})
-                    """, tuple(order_ids))
+                            SELECT SUM(ABS(change_amount)) as total_deducted_points
+                            FROM points_log
+                            WHERE type = 'member' AND change_amount < 0
+                                AND related_order IN ({placeholders})
+                    """, params_tuple)
                     total_deducted_points = cur.fetchone()['total_deducted_points'] or 0
 
                     # 总商户积分
                     cur.execute(f"""
-                        SELECT SUM(change_amount) as total_merchant_points
-                        FROM points_log
-                        WHERE type = 'merchant'
-                          AND related_order IN ({placeholders})
-                    """, tuple(order_ids))
+                            SELECT SUM(change_amount) as total_merchant_points
+                            FROM points_log
+                            WHERE type = 'merchant'
+                                AND related_order IN ({placeholders})
+                    """, params_tuple)
                     total_merchant_points = cur.fetchone()['total_merchant_points'] or 0
 
                 # 6. 构建返回数据
@@ -4744,7 +4749,7 @@ class FinanceService:
                     }
 
                 # 批量查询各类点数收入
-                user_ids = [str(u['id']) for u in users]
+                user_ids = [u['id'] for u in users]
                 income_map = {uid: {
                     'subsidy_points': Decimal('0'),
                     'referral_points': Decimal('0'),
@@ -4754,7 +4759,8 @@ class FinanceService:
                 } for uid in [u['id'] for u in users]}
 
                 if user_ids:
-                    placeholders = ','.join(['%s'] * len(user_ids))
+                    placeholders, params_dict = build_in_placeholders(user_ids)
+                    params_tuple = tuple(params_dict[f"id{i}"] for i in range(len(user_ids)))
 
                     # 从 account_flow 查询点数收入（flow_type='income'）
                     # account_type: referral_points, team_reward_points, honor_director, true_total_points
@@ -4768,7 +4774,7 @@ class FinanceService:
                         WHERE related_user IN ({placeholders})
                             AND account_type IN ('referral_points', 'team_reward_points', 'honor_director', 'true_total_points')
                         GROUP BY related_user, account_type
-                    """, tuple(user_ids))
+                    """, params_tuple)
 
                     for row in cur.fetchall():
                         uid = row['related_user']
@@ -4791,7 +4797,7 @@ class FinanceService:
                         FROM weekly_subsidy_records
                         WHERE user_id IN ({placeholders})
                         GROUP BY user_id
-                    """, tuple(user_ids))
+                    """, params_tuple)
 
                     for row in cur.fetchall():
                         uid = row['user_id']
@@ -4910,17 +4916,18 @@ class FinanceService:
                     return {"summary": {"total_users": 0, "report_type": "subsidy_points"}, "users": []}
 
                 # 查询累计收入
-                user_ids = [str(u['id']) for u in users]
+                user_ids = [u['id'] for u in users]
                 income_map = {}
                 if user_ids:
-                    placeholders = ','.join(['%s'] * len(user_ids))
+                    placeholders, params_dict = build_in_placeholders(user_ids)
+                    params_tuple = tuple(params_dict[f"id{i}"] for i in range(len(user_ids)))
                     cur.execute(f"""
                         SELECT related_user, COALESCE(SUM(change_amount), 0) as total_income
                         FROM account_flow
                         WHERE related_user IN ({placeholders})
                             AND account_type = 'subsidy_points' AND flow_type = 'income'
                         GROUP BY related_user
-                    """, tuple(user_ids))
+                    """, params_tuple)
 
                     for row in cur.fetchall():
                         income_map[row['related_user']] = Decimal(str(row['total_income']))
@@ -4972,17 +4979,18 @@ class FinanceService:
                     return {"summary": {"total_users": 0, "report_type": "unilevel_points"}, "users": []}
 
                 # 查询累计收入
-                user_ids = [str(u['id']) for u in users]
+                user_ids = [u['id'] for u in users]
                 income_map = {}
                 if user_ids:
-                    placeholders = ','.join(['%s'] * len(user_ids))
+                    placeholders, params_dict = build_in_placeholders(user_ids)
+                    params_tuple = tuple(params_dict[f"id{i}"] for i in range(len(user_ids)))
                     cur.execute(f"""
                         SELECT related_user, COALESCE(SUM(change_amount), 0) as total_income
                         FROM account_flow
                         WHERE related_user IN ({placeholders})
                             AND account_type = 'honor_director' AND flow_type = 'income'
                         GROUP BY related_user
-                    """, tuple(user_ids))
+                    """, params_tuple)
 
                     for row in cur.fetchall():
                         income_map[row['related_user']] = Decimal(str(row['total_income']))
@@ -5044,11 +5052,12 @@ class FinanceService:
                     return {"summary": {"total_users": 0, "report_type": "referral_and_team_points"}, "users": []}
 
                 # 批量查询累计收入
-                user_ids = [str(u['id']) for u in users]
+                user_ids = [u['id'] for u in users]
                 income_map = {}
 
                 if user_ids:
-                    placeholders = ','.join(['%s'] * len(user_ids))
+                    placeholders, params_dict = build_in_placeholders(user_ids)
+                    params_tuple = tuple(params_dict[f"id{i}"] for i in range(len(user_ids)))
                     cur.execute(f"""
                         SELECT 
                             related_user,
@@ -5059,7 +5068,7 @@ class FinanceService:
                             AND account_type IN ('referral_points', 'team_reward_points')
                             AND flow_type = 'income'
                         GROUP BY related_user, account_type
-                    """, tuple(user_ids))
+                    """, params_tuple)
 
                     for row in cur.fetchall():
                         uid = row['related_user']
