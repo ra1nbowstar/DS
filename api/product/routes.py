@@ -143,9 +143,9 @@ class SkuCreate(BaseModel):
         return v
 
 
-# ✅ 新增：SKU更新模型（必须提供id）
+# ✅ 修改：SkuUpdate 模型（id 改为可选字段）
 class SkuUpdate(BaseModel):
-    id: int  # 必须提供SKU的ID来定位记录
+    id: Optional[int] = None  # ✅ 改为可选，None 表示新增SKU
     sku_code: Optional[str] = None
     price: Optional[float] = Field(None, ge=0)
     original_price: Optional[float] = Field(None, ge=0)
@@ -566,7 +566,6 @@ def add_product(payload: ProductCreate):
                 raise HTTPException(status_code=400, detail=f"创建商品失败: {str(e)}")
 
 
-# ✅ 重写：支持SKU更新的商品更新接口（灵活控制会员商品价格）
 @router.put("/products/{id}", summary="✏️ 更新商品")
 def update_product(id: int, payload: ProductUpdate):
     with get_conn() as conn:
@@ -610,20 +609,46 @@ def update_product(id: int, payload: ProductUpdate):
                         WHERE id = %s
                     """, tuple(update_params))
 
-                # ✅ 灵活处理SKU价格：如果商品是会员商品且变为会员商品，强制1980
-                # 但如果提供了skus参数，则使用提供的价
-                if new_is_member is True and not payload.skus:
-                    # 如果没有提供SKU更新，但设置为会员商品，则将所有SKU价格改为1980
-                    cur.execute("""
-                        UPDATE product_skus 
-                        SET price = 1980.00, updated_at = NOW()
-                        WHERE product_id = %s
-                    """, (id,))
-                elif payload.skus is not None:
-                    # 提供了SKU更新参数，灵活控制价格
+                # ✅ 重写：智能SKU管理系统（支持增删改）
+                #    1. 有 id → 更新现有SKU
+                #    2. 无 id → 新增SKU
+                #    3. 前端未提供的SKU → 删除（保持数据同步）
+                if payload.skus is not None:
+                    # 收集前端提供的所有SKU ID（用于后续删除判断）
+                    provided_sku_ids = []
+
                     for sku_update in payload.skus:
+                        # ✅ 新增：处理新增SKU（无ID）
                         if not sku_update.id:
+                            # 验证必需字段
+                            if not sku_update.sku_code or sku_update.price is None or sku_update.stock is None:
+                                raise HTTPException(
+                                    status_code=400,
+                                    detail="新增SKU必须提供sku_code、price和stock字段"
+                                )
+
+                            # 插入新SKU
+                            cur.execute("""
+                                INSERT INTO product_skus 
+                                (product_id, sku_code, price, original_price, stock, specifications)
+                                VALUES (%s, %s, %s, %s, %s, %s)
+                            """, (
+                                id,
+                                sku_update.sku_code,
+                                sku_update.price,
+                                sku_update.original_price,
+                                sku_update.stock,
+                                json.dumps(sku_update.specifications, ensure_ascii=False)
+                                if sku_update.specifications else None
+                            ))
+                            # ✅ 修复：获取新插入的ID并加入列表，避免被删除
+                            new_sku_id = cur.lastrowid
+                            provided_sku_ids.append(new_sku_id)
+                            print(f"✅ 新增SKU: {sku_update.sku_code} (ID: {new_sku_id})")
                             continue
+
+                        # ✅ 处理更新SKU（有ID）
+                        provided_sku_ids.append(sku_update.id)
 
                         sku_fields = []
                         sku_params = []
@@ -632,7 +657,7 @@ def update_product(id: int, payload: ProductUpdate):
                             sku_fields.append("sku_code = %s")
                             sku_params.append(sku_update.sku_code)
 
-                        # ✅ 会员商品价格可灵活修改：如果提供了price则修改，否则保持原样
+                        # 会员商品价格可灵活修改：如果提供了price则修改，否则保持原样
                         if sku_update.price is not None:
                             sku_fields.append("price = %s")
                             sku_params.append(sku_update.price)
@@ -661,6 +686,33 @@ def update_product(id: int, payload: ProductUpdate):
                                 SET {build_select_list(sku_fields)}, updated_at = NOW()
                                 WHERE id = %s AND product_id = %s
                             """, tuple(sku_params))
+                            print(f"✅ 更新SKU ID {sku_update.id}")
+
+                    # ✅ 删除前端未提供的SKU（保持数据同步）
+                    if provided_sku_ids:
+                        # 构建删除条件：删除该商品下，但不在provided_sku_ids中的SKU
+                        format_ids = ','.join(['%s'] * len(provided_sku_ids))
+                        delete_params = [id] + provided_sku_ids
+                        cur.execute(f"""
+                            DELETE FROM product_skus 
+                            WHERE product_id = %s AND id NOT IN ({format_ids})
+                        """, tuple(delete_params))
+
+                        deleted_count = cur.rowcount
+                        if deleted_count > 0:
+                            print(f"✅ 删除 {deleted_count} 个未提及的SKU")
+                    else:
+                        # 如果前端只传了新增SKU（全都没ID），删除逻辑跳过
+                        print("⚠️ 未提供任何SKU ID，跳过删除逻辑")
+
+                # ✅ 新增：如果没有提供skus字段，但设置了is_member_product=True，则强制所有SKU价格为1980
+                elif new_is_member is True:
+                    cur.execute("""
+                        UPDATE product_skus 
+                        SET price = 1980.00, updated_at = NOW()
+                        WHERE product_id = %s
+                    """, (id,))
+                    print("✅ 会员商品：强制所有SKU价格为1980")
 
                 # 更新 attributes
                 if payload.attributes is not None:
