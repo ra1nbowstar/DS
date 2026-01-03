@@ -9,13 +9,14 @@ from pathlib import Path
 load_dotenv()
 
 
-
+# ==================== 应用配置 ====================
+UVICORN_PORT: int = int(os.getenv('UVICORN_PORT') or 8000)
 # ==================== 数据库配置 ====================
 def get_db_config():
     """获取数据库配置字典"""
     cfg = {
         'host': os.getenv('MYSQL_HOST', '127.0.0.1'),
-        'port': int(os.getenv('MYSQL_PORT', 3306)),
+        'port': int(os.getenv('MYSQL_PORT') or 3306),
         'user': os.getenv('MYSQL_USER'),
         'password': os.getenv('MYSQL_PASSWORD'),
         'database': os.getenv('MYSQL_DATABASE'),

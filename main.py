@@ -10,7 +10,7 @@ from fastapi.openapi.docs import get_swagger_ui_html, get_swagger_ui_oauth2_redi
 from core.json_response import DecimalJSONResponse, register_exception_handlers
 from fastapi.staticfiles import StaticFiles
 from core.middleware import setup_cors, setup_static_files
-from core.config import get_db_config, PIC_PATH, AVATAR_UPLOAD_DIR
+from core.config import get_db_config, PIC_PATH, AVATAR_UPLOAD_DIR,UVICORN_PORT
 from core.logging import setup_logging
 from database_setup import initialize_database
 
@@ -167,6 +167,7 @@ async def redoc_html():
 
 
 if __name__ == "__main__":
+    post = UVICORN_PORT
     # 初始化数据库表结构
     print("正在初始化数据库...")
     initialize_database()
@@ -175,16 +176,16 @@ if __name__ == "__main__":
     ensure_database()
 
     print("启动综合管理系统 API...")
-    print("财务管理系统 API 文档: http://127.0.0.1:8000/docs")
-    print("用户中心 API 文档: http://127.0.0.1:8000/docs")
-    print("订单系统 API 文档: http://127.0.0.1:8000/docs")
-    print("商品管理系统 API 文档: http://127.0.0.1:8000/docs")
+    print(f"财务管理系统 API 文档: http://127.0.0.1:{post}/docs")
+    print(f"用户中心 API 文档: http://127.0.0.1:{post}/docs")
+    print(f"订单系统 API 文档: http://127.0.0.1:{post}/docs")
+    print(f"商品管理系统 API 文档: http://127.0.0.1:{post}/docs")
 
     # 使用导入字符串以支持热重载
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
-        port=8000,
+        port=post,
         reload=True,  # 热重载已启用
         log_level="info",
         access_log=True

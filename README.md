@@ -2,13 +2,21 @@
 
 ## 启动前准备
 
-请先创建并配置 `.env` 文件在根目录中，示例如下：
-```
+```bash
+# 复制示例文件为 .env
+cp .env.example .env
+
+# 编辑 .env
 MYSQL_HOST=127.0.0.1
 MYSQL_PORT=3306
 MYSQL_USER=root
 MYSQL_PASSWORD=password
-MYSQL_DATABASE=sql_db
+MYSQL_DATABASE=database
+
+UVICORN_PORT=8000
+
+WECHAT_APP_ID=WECHAT_APP_ID
+WECHAT_APP_SECRET=WECHAT_APP_SECRET
 ```
 ---
 
@@ -73,9 +81,9 @@ MYSQL_DATABASE=sql_db
 		```
 
 保留说明
-启动后，访问 http://127.0.0.1:8000/docs 查看 API 文档。
+启动后，访问 http://127.0.0.1:<port>/docs 查看 API 文档（port 为环境变量 `UVICORN_PORT`，若未设置则默认使用 `8000`）。
 
-或者访问 http://127.0.0.1:8000/redoc 查看 ReDoc 文档。
+或者访问 http://127.0.0.1:<port>/redoc 查看 ReDoc 文档（port 同上）。
 
 ---
 
