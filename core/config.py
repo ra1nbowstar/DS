@@ -161,7 +161,15 @@ CATEGORY_CHOICES: Final[list[str]] = [
     "食品饮料", "数码电器", "图书文具", "运动户外", "其他"
 ]
 
-
+WX_MCHID: Final[str] = os.getenv('WX_MCHID', '')
+WX_CERT_SERIAL_NO: Final[str] = os.getenv('WX_CERT_SERIAL_NO', '')
+WX_APIV3_KEY: Final[str] = os.getenv('WX_APIV3_KEY', '')
+WX_PRIVATE_KEY_PATH: Final[str] = os.getenv('WX_PRIVATE_KEY_PATH', './certs/apiclient_key.pem')
+WECHATPAY_CERT_PATH: Final[str] = os.getenv('WECHATPAY_CERT_PATH', './certs/wechatpay_cert.pem')
+WX_WECHATPAY_SERIAL: Final[str] = os.getenv('WX_WECHATPAY_SERIAL', '')
+WX_PAY_BASE_URL: Final[str] = os.getenv('WX_PAY_BASE_URL', 'https://api.mch.weixin.qq.com')
+WX_MOCK_MODE: Final[str] = os.getenv('WX_MOCK_MODE', 'true')
+WX_MOCK_APPLY_RESULT: Final[str] = os.getenv('WX_MOCK_APPLY_RESULT', 'SUCCESS')
 # 添加审核状态枚举
 class AuditStatus(StrEnum):
     SUBMITTED = "submitted"  # 已提交

@@ -20,7 +20,7 @@ from services.director_service import DirectorService
 from services.wechat_service import WechatService
 from core.table_access import build_select_list
 from typing import List
-
+from .bankcard_routes import register_bankcard_routes
 
 logger = get_logger(__name__)
 
@@ -37,6 +37,7 @@ def register_routes(app):
     """注册用户中心路由到主应用"""
     # 将所有路由从 app 改为 router
     # 然后统一注册时添加 tags
+    register_bankcard_routes(app)
     app.include_router(router, tags=["用户中心"])
 
 
