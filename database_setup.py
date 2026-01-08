@@ -458,7 +458,7 @@ class DatabaseManager:
                     bank_name VARCHAR(50) NOT NULL,
                     bank_account VARCHAR(30) NOT NULL,
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE KEY uk_user_card (user_id, bank_account),
+                    INDEX idx_user_card (user_id, bank_account),
                     CONSTRAINT fk_user_bankcard FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             """,
@@ -568,6 +568,13 @@ class DatabaseManager:
                     verify_result ENUM('VERIFY_SUCCESS','VERIFY_FAIL','VERIFYING')
                         NOT NULL DEFAULT 'VERIFYING' COMMENT '验证结果',
                     verify_fail_reason VARCHAR(1024) NULL COMMENT '验证失败原因',
+                    modify_application_no VARCHAR(64) DEFAULT NULL COMMENT '改绑申请单号',
+                    modify_fail_reason VARCHAR(255) DEFAULT NULL COMMENT '改绑失败原因',
+                            -- ✅ 新增字段：改绑临时存储
+                    new_account_number_encrypted TEXT NULL COMMENT '改绑-新卡号(加密)',
+                    new_account_name_encrypted TEXT NULL COMMENT '改绑-新户名(加密)',
+                    new_bank_name VARCHAR(128) NULL COMMENT '改绑-新开户行',
+                    old_account_backup JSON NULL COMMENT '改绑-旧卡备份{number,name,bank}',
                     is_default TINYINT(1) NOT NULL DEFAULT 1 COMMENT '是否默认账户：1默认',
                     status TINYINT(1) NOT NULL DEFAULT 1 COMMENT '账户状态：1启用/0禁用',
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -687,6 +694,13 @@ class DatabaseManager:
             # 联创星级分红手动调整配置字段
             'finance_accounts': {
                 'config_params': "config_params JSON DEFAULT NULL COMMENT '资金池配置参数（如：fixed_amount_per_weight）'"
+            },
+            'merchant_settlement_accounts': {
+                # ✅ 新增改绑相关字段
+                'new_account_number_encrypted': "new_account_number_encrypted TEXT NULL COMMENT '改绑-新卡号(加密)'",
+                'new_account_name_encrypted': "new_account_name_encrypted TEXT NULL COMMENT '改绑-新户名(加密)'",
+                'new_bank_name': "new_bank_name VARCHAR(128) NULL COMMENT '改绑-新开户行'",
+                'old_account_backup': "old_account_backup JSON NULL COMMENT '改绑-旧卡备份{number,name,bank}'",
             },
             'coupons': {
                 # 检查并添加 applicable_product_type 字段
