@@ -106,30 +106,39 @@ class WechatApplymentService:
                     }
                     where_clause = "id = %s"
                     update_sql = build_dynamic_update(cur, "wx_applyment", update_data, where_clause)
-                    cur.execute(update_sql, (existing["id"],))
+                    # 关键修复：将SET值和WHERE值合并为参数列表
+                    params = list(update_data.values()) + [existing["id"]]
+                    cur.execute(update_sql, tuple(params))
                     conn.commit()
                     logger.info(f"用户 {user_id} 更新了进件草稿: {existing['id']}")
                     return {"applyment_id": existing["id"], "business_code": existing.get("business_code")}
                 else:
-                    # 创建新草稿
-                    insert_data = {
-                        "user_id": user_id,
-                        "business_code": business_code,
-                        "subject_type": data.get("subject_type", "SUBJECT_TYPE_INDIVIDUAL"),
-                        "subject_info": json.dumps(subject_info, ensure_ascii=False),
-                        "contact_info": json.dumps(contact_info, ensure_ascii=False),
-                        "bank_account_info": json.dumps(bank_account_info, ensure_ascii=False),
-                        "applyment_state": "APPLYMENT_STATE_EDITTING",
-                        "is_draft": 1,
-                        "draft_expired_at": draft_expires_at,
-                        "created_at": datetime.datetime.now(),
-                        "updated_at": datetime.datetime.now()
-                    }
-                    insert_sql = build_dynamic_insert(cur, "wx_applyment", insert_data)
-                    cur.execute(insert_sql)
+                    # ✅ 修复：使用原生 SQL 插入，避免 build_dynamic_insert 参数问题
+                    insert_sql = """
+                        INSERT INTO wx_applyment (
+                            user_id, business_code, subject_type, 
+                            subject_info, contact_info, bank_account_info,
+                            applyment_state, is_draft, draft_expired_at,
+                            created_at, updated_at
+                        ) VALUES (
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW()
+                        )
+                    """
+                    cur.execute(insert_sql, (
+                        user_id,
+                        business_code,
+                        data.get("subject_type", "SUBJECT_TYPE_INDIVIDUAL"),
+                        json.dumps(subject_info, ensure_ascii=False),
+                        json.dumps(contact_info, ensure_ascii=False),
+                        json.dumps(bank_account_info, ensure_ascii=False),
+                        "APPLYMENT_STATE_EDITTING",
+                        1,
+                        draft_expires_at
+                    ))
                     conn.commit()
-                    logger.info(f"用户 {user_id} 创建了进件草稿: {cur.lastrowid}")
-                    return {"applyment_id": cur.lastrowid, "business_code": business_code}
+                    new_id = cur.lastrowid
+                    logger.info(f"用户 {user_id} 创建了进件草稿: {new_id}")
+                    return {"applyment_id": new_id, "business_code": business_code}
 
     async def submit_applyment(self, user_id: int, data: dict) -> dict:
         """提交进件申请到微信支付"""
@@ -153,13 +162,29 @@ class WechatApplymentService:
                 if applyment["draft_expired_at"] and applyment["draft_expired_at"] < datetime.datetime.now():
                     raise HTTPException(status_code=400, detail="草稿已过期，请重新填写")
 
+                # 关联用户所有材料到当前草稿（按材料类型）
+                cur.execute("""
+                    UPDATE wx_applyment_media 
+                    SET applyment_id = %s 
+                    WHERE user_id = %s 
+                      AND media_type IN ('id_card_front', 'id_card_back', 'business_license')
+                """, (applyment["id"], user_id))
+                conn.commit()
+                logger.info(f"关联 {cur.rowcount} 个材料到草稿 {applyment['id']}")
+
                 # 验证材料完整性
                 self._validate_media(cur, user_id, applyment["id"])
 
                 # 经营类目锁定校验（如果已有审核记录）
                 if applyment.get('subject_info'):
-                    old_info = json.loads(applyment['subject_info'])
-                    new_info = json.loads(data.get('subject_info', '{}'))
+                    # 处理旧数据（从数据库读取）
+                    old_info_raw = applyment['subject_info']
+                    old_info = json.loads(old_info_raw) if isinstance(old_info_raw, str) else old_info_raw
+
+                    # 处理新数据（来自请求）
+                    new_info_raw = data.get('subject_info', {})
+                    new_info = json.loads(new_info_raw) if isinstance(new_info_raw, str) else new_info_raw
+
                     if old_info.get('business_category') and old_info.get('business_category') != new_info.get(
                             'business_category'):
                         raise HTTPException(status_code=400, detail="经营类目不可修改")
@@ -170,19 +195,17 @@ class WechatApplymentService:
                     applyment_id = response.get("applyment_id")
 
                     # 更新状态
-                    update_sql = build_dynamic_update(
-                        cur,
-                        "wx_applyment",
-                        {
-                            "applyment_id": applyment_id,
-                            "applyment_state": "APPLYMENT_STATE_AUDITING",
-                            "is_draft": 0,
-                            "submitted_at": datetime.datetime.now(),
-                            "updated_at": datetime.datetime.now()
-                        },
-                        "id = %s"
-                    )
-                    cur.execute(update_sql, (applyment["id"],))
+                    update_data = {
+                        "applyment_id": applyment_id,
+                        "applyment_state": "APPLYMENT_STATE_AUDITING",
+                        "is_draft": 0,
+                        "submitted_at": datetime.datetime.now(),
+                        "updated_at": datetime.datetime.now()
+                    }
+                    update_sql = build_dynamic_update(cur, "wx_applyment", update_data, "id = %s")
+                    # 关键修复：合并SET参数和WHERE参数
+                    params = list(update_data.values()) + [applyment["id"]]
+                    cur.execute(update_sql, tuple(params))
 
                     # 记录日志
                     self._log_state_change(cur, applyment["id"], applyment["business_code"],
@@ -243,29 +266,36 @@ class WechatApplymentService:
                 draft = cur.fetchone()
                 applyment_id = draft['id'] if draft else None
 
-                insert_data = {
-                    "user_id": user_id,
-                    "applyment_id": applyment_id,
-                    "media_id": media_id,
-                    "media_type": media_type,
-                    "file_path": str(file_path),
-                    "file_name": file.filename,
-                    "file_size": file_size,
-                    "sha256": sha256,
-                    "mime_type": file.content_type,
-                    "upload_status": "uploaded",
-                    "expires_at": datetime.datetime.now() + datetime.timedelta(days=1),
-                    "created_at": datetime.datetime.now()
-                }
-                insert_sql = build_dynamic_insert(cur, "wx_applyment_media", insert_data)
-                cur.execute(insert_sql)
+                # ✅ 修复：使用原生 SQL 插入，避免 build_dynamic_insert 参数问题
+                insert_sql = """
+                    INSERT INTO wx_applyment_media (
+                        user_id, applyment_id, media_id, media_type,
+                        file_path, file_name, file_size, sha256, mime_type,
+                        upload_status, expires_at, created_at
+                    ) VALUES (
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW()
+                    )
+                """
+                cur.execute(insert_sql, (
+                    user_id,
+                    applyment_id,
+                    media_id,
+                    media_type,
+                    str(file_path),
+                    file.filename,
+                    file_size,
+                    sha256,
+                    file.content_type,
+                    "uploaded",
+                    datetime.datetime.now() + datetime.timedelta(days=1)
+                ))
                 conn.commit()
                 logger.info(f"用户 {user_id} 上传材料: {media_id} - {file.filename}")
 
                 return {
                     "media_id": media_id,
                     "file_path": str(file_path),
-                    "expires_at": insert_data["expires_at"]
+                    "expires_at": datetime.datetime.now() + datetime.timedelta(days=1)
                 }
 
     def list_media(self, user_id: int, applyment_id: Optional[int] = None) -> List[dict]:
@@ -275,7 +305,8 @@ class WechatApplymentService:
                 where_clause = "user_id = %s"
                 params = [user_id]
 
-                if applyment_id:
+                # ✅ 修复：判断 applyment_id 是否为 None，而不是是否为 0
+                if applyment_id is not None:
                     where_clause += " AND applyment_id = %s"
                     params.append(applyment_id)
 
@@ -352,17 +383,15 @@ class WechatApplymentService:
                     raise HTTPException(status_code=400, detail="经营类目不可修改")
 
                 # 标记核心信息已修改
-                update_sql = build_dynamic_update(
-                    cur,
-                    "wx_applyment",
-                    {
-                        "is_core_info_modified": 1,
-                        "applyment_state": "APPLYMENT_STATE_EDITTING",
-                        "updated_at": datetime.datetime.now()
-                    },
-                    "id = %s"
-                )
-                cur.execute(update_sql, (existing["id"],))
+                update_data = {
+                    "is_core_info_modified": 1,
+                    "applyment_state": "APPLYMENT_STATE_EDITTING",
+                    "updated_at": datetime.datetime.now()
+                }
+                update_sql = build_dynamic_update(cur, "wx_applyment", update_data, "id = %s")
+                # 关键修复：合并SET参数和WHERE参数
+                params = list(update_data.values()) + [existing["id"]]
+                cur.execute(update_sql, tuple(params))
 
                 # 创建新的进件记录
                 new_business_code = str(uuid.uuid4()).replace('-', '')
@@ -381,7 +410,8 @@ class WechatApplymentService:
                     "updated_at": datetime.datetime.now()
                 }
                 insert_sql = build_dynamic_insert(cur, "wx_applyment", insert_data)
-                cur.execute(insert_sql)
+                # 关键修复：提供插入参数
+                cur.execute(insert_sql, tuple(insert_data.values()))
 
                 conn.commit()
                 logger.info(f"用户 {user_id} 修改核心信息，重新进件: {cur.lastrowid}")
@@ -408,16 +438,14 @@ class WechatApplymentService:
                 response = self.pay_client.submit_applyment(applyment)
 
                 # 更新状态
-                update_sql = build_dynamic_update(
-                    cur,
-                    "wx_applyment",
-                    {
-                        "applyment_state": "APPLYMENT_STATE_AUDITING",
-                        "updated_at": datetime.datetime.now()
-                    },
-                    "id = %s"
-                )
-                cur.execute(update_sql, (applyment_id,))
+                update_data = {
+                    "applyment_state": "APPLYMENT_STATE_AUDITING",
+                    "updated_at": datetime.datetime.now()
+                }
+                update_sql = build_dynamic_update(cur, "wx_applyment", update_data, "id = %s")
+                # 关键修复：合并SET参数和WHERE参数
+                params = list(update_data.values()) + [applyment_id]
+                cur.execute(update_sql, tuple(params))
 
                 # 记录日志
                 self._log_state_change(cur, applyment_id, applyment["business_code"],
@@ -447,9 +475,10 @@ class WechatApplymentService:
 
     def _validate_media(self, cur, user_id: int, applyment_id: int):
         """验证材料完整性"""
+        # ✅ 修复：同时检查 NULL 和 0
         cur.execute("""
             SELECT media_type FROM wx_applyment_media 
-            WHERE user_id = %s AND (applyment_id = %s OR applyment_id IS NULL)
+            WHERE user_id = %s AND (applyment_id = %s OR applyment_id IS NULL OR applyment_id = 0)
         """, (user_id, applyment_id))
         uploaded = {row['media_type'] for row in cur.fetchall()}
 
@@ -480,7 +509,8 @@ class WechatApplymentService:
             "created_at": datetime.datetime.now()
         }
         insert_sql = build_dynamic_insert(cur, "wx_applyment_log", log_data)
-        cur.execute(insert_sql)
+        # 关键修复：提供插入参数
+        cur.execute(insert_sql, tuple(log_data.values()))
 
     async def handle_applyment_state_change(self, applyment_id: int, new_state: str, status_info: Dict[str, Any]):
         """处理进件状态变更（带推送）"""

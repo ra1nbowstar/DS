@@ -12,6 +12,7 @@ from models.schemas.user import (
 from core.database import get_conn
 from core.logging import get_logger
 from core.table_access import build_dynamic_select, get_table_structure, _quote_identifier
+from core.auth import create_access_token  # ✅ 新增：导入 Token 创建函数
 from services.user_service import UserService, UserStatus, verify_pwd, hash_pwd
 from services.address_service import AddressService
 from services.points_service import add_points
@@ -20,7 +21,6 @@ from services.director_service import DirectorService
 from services.wechat_service import WechatService
 from core.table_access import build_select_list
 from typing import List
-from .bankcard_routes import register_bankcard_routes
 
 logger = get_logger(__name__)
 
@@ -37,7 +37,6 @@ def register_routes(app):
     """注册用户中心路由到主应用"""
     # 将所有路由从 app 改为 router
     # 然后统一注册时添加 tags
-    register_bankcard_routes(app)
     app.include_router(router, tags=["用户中心"])
 
 
@@ -97,42 +96,67 @@ def set_user_status(body: SetStatusReq):
             conn.commit()
             return {"success": True}
 
+
 @router.post("/user/auth", summary="一键登录（不存在则自动注册）")
 def user_auth(body: AuthReq):
+    """
+    用户认证接口
+    - 支持自动注册
+    - 返回持久化的 JWT/UUID Token
+    """
     with get_conn() as conn:
         with conn.cursor() as cur:
             select_sql = build_dynamic_select(
                 cur,
                 "users",
                 where_clause="mobile=%s",
-                select_fields=["id", "password_hash", "member_level", "status"]
+                select_fields=["id", "password_hash", "member_level", "status", "name"]
             )
             cur.execute(select_sql, (body.mobile,))
             row = cur.fetchone()
 
+            is_new_user = False
+
             if row:
+                # 已有用户：验证密码
                 if not verify_pwd(body.password, row["password_hash"]):
                     raise HTTPException(status_code=400, detail="手机号或密码错误")
+
                 status = row["status"]
                 if status == UserStatus.FROZEN:
                     raise HTTPException(status_code=403, detail="账号已冻结")
                 if status == UserStatus.DELETED:
                     raise HTTPException(status_code=403, detail="账号已注销")
-                token = str(uuid.uuid4())
-                return AuthResp(uid=row["id"], token=token, level=row["member_level"], is_new=False)
 
-            try:
-                uid = UserService.register(
-                    mobile=body.mobile,
-                    pwd=body.password,
-                    name=body.name,
-                    referrer_mobile=None
-                )
-            except ValueError as e:
-                raise HTTPException(status_code=400, detail=str(e))
+                user_id = row["id"]
+                level = row["member_level"]
+                name = row["name"]
+            else:
+                # 新用户：自动注册
+                try:
+                    user_id = UserService.register(
+                        mobile=body.mobile,
+                        pwd=body.password,
+                        name=body.name,
+                        referrer_mobile=None
+                    )
+                    level = 0
+                    is_new_user = True
+                    name = body.name
+                except ValueError as e:
+                    raise HTTPException(status_code=400, detail=str(e))
 
-            token = str(uuid.uuid4())
-            return AuthResp(uid=uid, token=token, level=0, is_new=True)
+            # ✅ 关键修复：创建并持久化 Token（保存到 sessions 表或 users.token 字段）
+            token = create_access_token(user_id, token_type="uuid")
+
+            logger.info(f"用户认证成功 - ID: {user_id}, 手机: {body.mobile}, Token: {token[:8]}...")
+
+            return AuthResp(
+                uid=user_id,
+                token=token,
+                level=level,
+                is_new=is_new_user
+            )
 
 @router.post("/user/update-profile", summary="修改资料（动态字段/兼容老库）")
 def update_profile(body: UpdateProfileReq):

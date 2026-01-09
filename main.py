@@ -29,7 +29,9 @@ from api.product.routes import register_routes as register_product_routes
 from api.system.routes import register_routes as register_system_routes
 from api.wechat_applyment.routes import register_wechat_applyment_routes
 from api.store_setup.routes import register_store_routes
-
+# 删除或注释掉旧的导入：from api.user.bankcard_routes import register_bankcard_routes
+# 新增导入：
+from api.bankcard.routes import register_bankcard_routes
 
 def ensure_database():
     """确保数据库存在"""
@@ -95,6 +97,11 @@ tags_metadata = [
         "name": "微信进件",
         "description": "微信支付进件相关接口，包括实名认证、进件申请、材料上传、状态查询等功能。",
     },
+    # 新增标签：
+    {
+        "name": "银行卡管理",
+        "description": "银行卡绑定、解绑、改绑、状态查询等独立功能模块。",
+    },
 ]
 
 # 更新 OpenAPI Schema 的 tags 元数据
@@ -116,6 +123,7 @@ register_system_routes(app)
 register_wechat_applyment_routes(app)  # 添加这一行
 register_wechat_pay_routes(app)
 register_store_routes(app)
+register_bankcard_routes(app) # 修改：注册新的银行卡路由
 
 # 自定义 OpenAPI Schema 生成函数，确保只显示定义的4个标签
 # 注意：必须在路由注册之后设置，否则 schema 中不会包含路由

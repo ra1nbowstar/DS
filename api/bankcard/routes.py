@@ -1,4 +1,4 @@
-# api/user/bankcard_routes.py
+# api/bankcard/routes.py
 from fastapi import APIRouter, HTTPException, Depends, Request, Header, Query, Form
 from typing import Optional, List
 from pydantic import BaseModel, Field, validator
@@ -217,12 +217,12 @@ def register_bankcard_routes(app):
     """注册银行卡路由"""
     app.include_router(
         router,
-        prefix="/api/user/bankcard",
-        tags=["用户中心-银行卡管理"],
+        prefix="/api/bankcard",  # 修改：从 /api/user/bankcard 改为 /api/bankcard
+        tags=["银行卡管理"],       # 修改：独立标签
         responses={
             400: {"description": "业务错误"},
             401: {"description": "未认证"},
             500: {"description": "服务器内部错误"}
         }
     )
-    logger.info("✅ 银行卡路由注册完成 (路径: /api/user/bankcard/*)")
+    logger.info("✅ 银行卡路由注册完成 (路径: /api/bankcard/*)")
