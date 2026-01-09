@@ -28,6 +28,7 @@ from api.order import register_routes as register_order_routes
 from api.product.routes import register_routes as register_product_routes
 from api.system.routes import register_routes as register_system_routes
 from api.wechat_applyment.routes import register_wechat_applyment_routes
+from api.store_setup.routes import register_store_routes
 
 
 def ensure_database():
@@ -114,7 +115,7 @@ register_product_routes(app)
 register_system_routes(app)
 register_wechat_applyment_routes(app)  # 添加这一行
 register_wechat_pay_routes(app)
-
+register_store_routes(app)
 
 # 自定义 OpenAPI Schema 生成函数，确保只显示定义的4个标签
 # 注意：必须在路由注册之后设置，否则 schema 中不会包含路由
