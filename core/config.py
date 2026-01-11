@@ -58,6 +58,10 @@ class Settings(BaseSettings):
     WX_PAY_BASE_URL: str = "https://api.mch.weixin.qq.com"
     WECHATPAY_CERT_PATH: str = ""
     WX_WECHATPAY_SERIAL: str = ""
+    WECHAT_CERT_SERIAL_NO: str = ""          
+    WECHAT_TMPL_MERCHANT_INCOME: str = ""    
+    WECHAT_SECRET: str = "" 
+    WX_MOCK_MODE: bool = False                 
 
     PUSH_TEMPLATE_ID_APPLYMENT: str = ""
 
