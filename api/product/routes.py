@@ -970,7 +970,17 @@ def get_sales_data(id: int):
 
             row = cur.fetchone()
             if not row or not row.get('qty'):
-                raise HTTPException(status_code=404, detail="暂无销售数据")
+            # 如果没有销售数据或查询结果为 NULL，返回 0 而不是 404
+                qty = int(row['qty']) if row and row.get('qty') else 0
+                sales = float(row['sales']) if row and row.get('sales') else 0.0
+
+                return {
+                    "status": "success",
+                    "data": {
+                        "total_quantity": qty,
+                        "total_sales": sales
+                    }
+                }
 
             return {
                 "status": "success",
