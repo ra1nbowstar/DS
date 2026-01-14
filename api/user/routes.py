@@ -1246,11 +1246,19 @@ def is_merchant(mobile: str):
     return {"is_merchant": UserService.is_merchant(mobile)}
 
 
-@router.post("/user/wechat-login", summary="微信小程序登录", response_model=AuthResp)  # ✅ 修改：添加 response_model=AuthResp
+@router.post("/wechat/login", summary="微信小程序登录")
 async def wechat_login(request: Request):
-    """微信小程序登录接口"""
+    """微信小程序登录接口 - 使用124位专用Token"""
     # 确保 users 表存在 openid 字段（兼容旧库）
-    WechatService.ensure_openid_column()
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SET FOREIGN_KEY_CHECKS = 0")  #-- ✅ 临时禁用外键
+                WechatService.ensure_openid_column()
+                cur.execute("SET FOREIGN_KEY_CHECKS = 1")  #-- ✅ 恢复外键检查
+                conn.commit()
+    except Exception as e:
+        logger.warning(f"确保openid字段时出错: {e}")  #-- 非致命错误，继续执行
 
     try:
         data = await request.json()
@@ -1272,25 +1280,23 @@ async def wechat_login(request: Request):
 
         # 检查用户是否已注册
         user = WechatService.check_user_by_openid(openid)
-        is_new_user = False  # ✅ 新增：标记是否为新用户
+        is_new_user = False
 
         if not user:
             # 注册新用户
             user_id = WechatService.register_user(openid, nick_name)
-            level = 0  # ✅ 新增：新用户默认等级
-            is_new_user = True  # ✅ 新增：标记为新用户
+            level = 0
+            is_new_user = True
         else:
             user_id = user['id']
-            # ✅ 新增：从用户记录中获取等级（兼容旧数据）
             level = user.get('member_level', 0)
             is_new_user = False
 
-        # ✅ 修改：使用 create_access_token 替代 WechatService.generate_token，与 /user/auth 保持一致
-        token = create_access_token(user_id, token_type="uuid")
+        # ✅ 关键修改：使用微信专用Token类型，生成124位Token
+        token = create_access_token(user_id, token_type="wechat")
 
-        logger.info(f"微信登录成功 - 用户ID: {user_id}, Token: {token[:8]}...")
+        logger.info(f"微信登录成功 - 用户ID: {user_id}, Token: {token[:20]}..., Token长度: {len(token)}")
 
-        # ✅ 修改：返回 AuthResp 对象，与 /user/auth 格式一致
         return AuthResp(
             uid=user_id,
             token=token,
@@ -1302,7 +1308,6 @@ async def wechat_login(request: Request):
         raise
     except Exception as e:
         logger.exception("微信登录失败")
-        # 为避免将原始异常（可能包含 Decimal 等不可序列化对象）放入响应，返回简单错误信息
         raise HTTPException(status_code=500, detail="微信登录失败")
 
 @router.get("/user/mobile", response_model=MobileResp, summary="根据用户ID获取手机号")

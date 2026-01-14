@@ -90,7 +90,7 @@ class DatabaseManager:
                     six_team INT NULL DEFAULT 0 COMMENT '团队六星人数，用于荣誉董事晋升判定',
                     wechat_sub_mchid VARCHAR(32) NULL DEFAULT NULL COMMENT '微信特约商户号',
                     openid VARCHAR(128) NULL DEFAULT NULL COMMENT '微信小程序openid',
-                    token VARCHAR(64) NULL COMMENT 'UUID认证token（仅开发环境）',
+                    token VARCHAR(256) NULL COMMENT '认证token（支持UUID/JWT/微信Token）',
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                     INDEX idx_mobile (mobile),
