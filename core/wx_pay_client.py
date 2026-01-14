@@ -1,5 +1,5 @@
 # core/wx_pay_client.py
-# ...（保持原有imports）
+# 微信支付V3 API客户端（生产级，支持公钥ID方式自动下载平台证书）
 import os
 import hashlib
 import time
@@ -12,13 +12,14 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography import x509
 import requests
 
 from core.config import (
     WECHAT_PAY_MCH_ID, WECHAT_PAY_API_V3_KEY,
     WECHAT_PAY_API_CERT_PATH, WECHAT_PAY_API_KEY_PATH,
     WECHAT_PAY_PLATFORM_CERT_PATH, WECHAT_APP_ID, WECHAT_APP_SECRET,
-    ENVIRONMENT  # 新增：环境标识
+    ENVIRONMENT, WECHAT_PAY_PUB_KEY_ID
 )
 from core.database import get_conn
 from core.logging import get_logger
@@ -28,7 +29,7 @@ logger = get_logger(__name__)
 
 
 class WeChatPayClient:
-    """微信支付V3 API客户端（生产级，支持无缝Mock切换）"""
+    """微信支付V3 API客户端（生产级，支持公钥ID方式自动下载平台证书）"""
 
     BASE_URL = "https://api.mch.weixin.qq.com"
 
@@ -45,7 +46,7 @@ class WeChatPayClient:
     }
 
     def __init__(self):
-        # ✅ Mock模式开关（生产环境强制禁止）
+        # Mock模式开关（生产环境强制禁止）
         self.mock_mode = os.getenv('WX_MOCK_MODE', 'false').lower() == 'true'
 
         # 安全：生产环境禁止Mock
@@ -62,6 +63,7 @@ class WeChatPayClient:
         self.cert_path = WECHAT_PAY_API_CERT_PATH
         self.key_path = WECHAT_PAY_API_KEY_PATH
         self.platform_cert_path = WECHAT_PAY_PLATFORM_CERT_PATH
+        self.pub_key_id = WECHAT_PAY_PUB_KEY_ID
 
         # 初始化连接池
         self.session = requests.Session()
@@ -71,7 +73,7 @@ class WeChatPayClient:
             max_retries=3
         ))
 
-        # Mock模式下不强制加载证书
+        # 加载密钥和公钥
         self.private_key = self._load_private_key()
         self.wechat_public_key = self._load_wechat_public_key()
         self._cached_serial_no = None
@@ -80,10 +82,104 @@ class WeChatPayClient:
         if self.mock_mode:
             self._ensure_mock_applyment_exists()
 
-    # ==================== Mock数据生成（增强版） ====================
+    # ==================== 公钥加载（支持自动下载） ====================
+
+    def _load_wechat_public_key(self):
+        """加载微信支付平台公钥（支持公钥ID自动下载）"""
+
+        # 方式A：通过公钥ID自动下载
+        pub_key_id = os.getenv('WECHAT_PAY_PUB_KEY_ID')
+        if pub_key_id and pub_key_id.startswith('PUB_KEY_'):
+            try:
+                return self._download_and_cache_platform_cert(pub_key_id)
+            except Exception as e:
+                logger.error(f"公钥ID方式获取证书失败: {e}")
+                # ✅ 生产环境不允许回退到文件方式
+                if not self.mock_mode and ENVIRONMENT == 'production':
+                    raise
+
+        # 方式B：回退到传统文件方式（仅开发/测试环境）
+        try:
+            if not os.path.exists(self.platform_cert_path):
+                # ✅ 如果文件不存在且是生产环境，抛出明确错误
+                if ENVIRONMENT == 'production':
+                    raise FileNotFoundError(
+                        f"生产环境必须配置有效的平台证书。请检查：\n"
+                        f"1. WECHAT_PAY_PUB_KEY_ID 是否配置正确（必须以PUB_KEY_开头）\n"
+                        f"2. 或确保 WECHAT_PAY_PLATFORM_CERT_PATH 指向有效文件: {self.platform_cert_path}"
+                    )
+                # 非生产环境可以跳过
+                logger.warning("平台证书文件不存在，将跳过验签（仅限开发环境）")
+                return None
+
+            with open(self.platform_cert_path, 'rb') as f:
+                return serialization.load_pem_public_key(
+                    f.read(),
+                    backend=default_backend()
+                )
+        except Exception as e:
+            logger.error(f"加载微信支付平台公钥失败: {e}")
+            if not self.mock_mode:
+                raise
+            return None
+    def _download_and_cache_platform_cert(self, pub_key_id: str):
+        """从微信API下载平台证书并缓存到本地"""
+
+        # 构建请求头
+        timestamp = str(int(time.time()))
+        nonce_str = str(uuid.uuid4()).replace('-', '')
+        signature = self._sign('GET', '/v3/certificates', timestamp, nonce_str, '')
+
+        headers = {
+            'Authorization': f'WECHATPAY2-SHA256-RSA2048 mchid="{self.mchid}",serial_no="{self._get_merchant_serial_no()}",nonce_str="{nonce_str}",timestamp="{timestamp}",signature="{signature}"',
+            'Accept': 'application/json',
+            'User-Agent': 'WeChatPay-Python/1.0',
+        }
+
+        # 调用微信证书下载接口
+        url = f"{self.BASE_URL}/v3/certificates"
+        response = requests.get(url, headers=headers, timeout=30)
+        response.raise_for_status()
+
+        certs_data = response.json()
+
+        # 解密并找到匹配的证书
+        for cert_item in certs_data.get('data', []):
+            serial_no = cert_item.get('serial_no')
+            encrypt_certificate = cert_item.get('encrypt_certificate', {})
+
+            # 解密证书内容
+            key = self.apiv3_key
+            aesgcm = AESGCM(key)
+            nonce = encrypt_certificate.get('nonce', '').encode()
+            associated_data = encrypt_certificate.get('associated_data', '').encode()
+            ciphertext = base64.b64decode(encrypt_certificate.get('ciphertext', ''))
+
+            cert_pem = aesgcm.decrypt(nonce, ciphertext, associated_data).decode()
+
+            # 缓存到本地
+            cert_path = f"./certs/wechatpay_{serial_no}.pem"
+            os.makedirs('./certs', exist_ok=True)
+            with open(cert_path, 'w') as f:
+                f.write(cert_pem)
+
+            logger.info(f"平台证书已缓存: {cert_path}")
+
+            # 加载公钥
+            cert = x509.load_pem_x509_certificate(cert_pem.encode(), default_backend())
+            public_key = cert.public_key()
+
+            # 检查是否匹配指定的公钥ID
+            if serial_no == pub_key_id.replace('PUB_KEY_', ''):
+                logger.info(f"成功加载匹配的公钥ID: {pub_key_id}")
+                return public_key
+
+        raise Exception(f"未找到匹配的公钥ID: {pub_key_id}")
+
+    # ==================== Mock数据生成 ====================
 
     def _ensure_mock_applyment_exists(self):
-        """确保Mock模式下有测试用的进件记录（环境隔离）"""
+        """确保Mock模式下有测试用的进件记录"""
         if not self.mock_mode:
             return
 
@@ -94,13 +190,11 @@ class WeChatPayClient:
         try:
             with get_conn() as conn:
                 with conn.cursor() as cur:
-                    # 使用负数user_id避免冲突
                     cur.execute("""
                         SELECT user_id FROM wx_applyment 
                         WHERE user_id = -1 AND applyment_state = 'APPLYMENT_STATE_FINISHED'
                     """)
                     if not cur.fetchone():
-                        # 插入完整的Mock数据
                         mock_data = {
                             "business_code": f"MOCK_BUSINESS_{int(time.time())}",
                             "sub_mchid": f"MOCK_SUB_MCHID_{uuid.uuid4().hex[:8].upper()}",
@@ -141,17 +235,15 @@ class WeChatPayClient:
             logger.debug(f"Mock初始化失败（可忽略）: {e}")
 
     def _generate_mock_application_no(self, sub_mchid: str) -> str:
-        """生成模拟的申请单号（包含时间戳和随机码）"""
+        """生成模拟的申请单号"""
         timestamp = int(time.time())
         random_code = hashlib.md5(f"{sub_mchid}{timestamp}{uuid.uuid4()}".encode()).hexdigest()[:8]
         return f"MOCK_APP_{timestamp}_{sub_mchid}_{random_code}"
 
     def _get_mock_settlement_data(self, sub_mchid: str) -> Dict[str, Any]:
-        """模拟微信结算账户查询返回 - 100%对齐真实接口"""
+        """模拟微信结算账户查询返回"""
         logger.info(f"【MOCK】查询结算账户: sub_mchid={sub_mchid}")
-
-        # 从配置读取Mock行为
-        mock_behavior = os.getenv('WX_MOCK_SETTLEMENT_BEHAVIOR', 'normal')  # normal | fail | verifying
+        mock_behavior = os.getenv('WX_MOCK_SETTLEMENT_BEHAVIOR', 'normal')
 
         base_data = {
             'account_type': 'ACCOUNT_TYPE_PRIVATE',
@@ -179,12 +271,10 @@ class WeChatPayClient:
                 'verify_fail_reason': ''
             })
 
-        # 尝试从数据库读取真实数据（如果存在）
         try:
             with get_conn() as conn:
                 with conn.cursor() as cur:
-                    cur.execute(
-                        """
+                    cur.execute("""
                         SELECT account_bank, bank_name, 
                                account_number_encrypted, account_name_encrypted,
                                bank_address_code, bank_branch_id
@@ -192,17 +282,13 @@ class WeChatPayClient:
                         WHERE sub_mchid = %s AND status = 1
                         ORDER BY updated_at DESC
                         LIMIT 1
-                        """,
-                        (sub_mchid,)
-                    )
+                    """, (sub_mchid,))
                     record = cur.fetchone()
                     if record:
                         try:
                             full_number = self._decrypt_local_encrypted(record['account_number_encrypted'])
-                            # 使用微信掩码格式：前6位 + * + 后4位
                             masked_number = f"{full_number[:6]}**********{full_number[-4:]}"
                             full_name = self._decrypt_local_encrypted(record['account_name_encrypted'])
-
                             return {
                                 'account_type': 'ACCOUNT_TYPE_PRIVATE',
                                 'account_bank': record['account_bank'] or base_data['account_bank'],
@@ -218,13 +304,11 @@ class WeChatPayClient:
                             logger.warning(f"Mock解密失败，使用默认数据: {e}")
         except Exception as e:
             logger.warning(f"Mock读取数据库失败: {e}")
-
         return base_data
 
     def _get_mock_application_status(self, application_no: str) -> Dict[str, Any]:
-        """模拟微信申请状态查询 - 支持配置化行为"""
+        """模拟微信申请状态查询"""
         try:
-            # 解析时间戳判断是否超时
             parts = application_no.split('_')
             if len(parts) >= 3 and parts[2].isdigit():
                 app_time = int(parts[2])
@@ -234,14 +318,13 @@ class WeChatPayClient:
         except:
             elapsed = 999
 
-        # 读取Mock配置
-        mock_result = os.getenv('WX_MOCK_APPLY_RESULT', 'SUCCESS')  # SUCCESS | FAIL | PENDING
+        mock_result = os.getenv('WX_MOCK_APPLY_RESULT', 'SUCCESS')
 
         if mock_result == 'PENDING' or elapsed < 5:
             return {
                 'applyment_state': 'APPLYMENT_STATE_AUDITING',
                 'applyment_state_msg': '审核中，请稍后...',
-                'account_name': '张*',  # 增加更多字段
+                'account_name': '张*',
                 'account_type': 'ACCOUNT_TYPE_PRIVATE',
                 'account_bank': '工商银行',
                 'account_number': '62*************78'
@@ -263,7 +346,7 @@ class WeChatPayClient:
                 'verify_finish_time': datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S+08:00')
             }
 
-    # ==================== 证书加载（保持不变） ====================
+    # ==================== 证书加载 ====================
 
     def _load_private_key(self):
         """加载商户私钥（PEM格式）"""
@@ -276,20 +359,6 @@ class WeChatPayClient:
                 )
         except Exception as e:
             logger.error(f"加载微信支付私钥失败: {e}")
-            if not self.mock_mode:
-                raise
-            return None
-
-    def _load_wechat_public_key(self):
-        """加载微信支付平台公钥"""
-        try:
-            with open(self.platform_cert_path, 'rb') as f:
-                return serialization.load_pem_public_key(
-                    f.read(),
-                    backend=default_backend()
-                )
-        except Exception as e:
-            logger.warning(f"加载微信支付平台公钥失败: {e}")
             if not self.mock_mode:
                 raise
             return None
@@ -316,12 +385,11 @@ class WeChatPayClient:
             self._cached_serial_no = self.mchid
             return self._cached_serial_no
 
-    # ==================== 加密与签名（保持不变） ====================
+    # ==================== 加密与签名 ====================
 
     def _rsa_encrypt_with_wechat_public_key(self, plaintext: str) -> str:
         """使用微信支付平台公钥加密（用于敏感数据）"""
         if self.mock_mode:
-            # Mock模式下返回模拟加密串，格式：MOCK_ENC_{时间戳}_{原文}_{随机码}
             timestamp = int(time.time())
             random_code = hashlib.md5(f"{plaintext}{timestamp}".encode()).hexdigest()[:6]
             mock_enc = f"MOCK_ENC_{timestamp}_{plaintext}_{random_code}"
@@ -340,36 +408,22 @@ class WeChatPayClient:
         )
         return base64.b64encode(ciphertext).decode('utf-8')
 
-    # ✅ 新增：公共加密方法（供外部服务调用）
     def encrypt_sensitive_data(self, plaintext: str) -> str:
-        """
-        公共方法：加密敏感数据（用于外部服务调用）
-        实际调用内部的 RSA 加密方法
-
-        Args:
-            plaintext: 待加密的明文（如银行卡号、户名）
-
-        Returns:
-            加密后的字符串（Base64 编码）
-        """
+        """公共方法：加密敏感数据（供外部服务调用）"""
         try:
             return self._rsa_encrypt_with_wechat_public_key(plaintext)
         except Exception as e:
             logger.error(f"敏感数据加密失败: {str(e)}")
             if self.mock_mode:
-                # Mock 模式下直接返回模拟加密串
                 timestamp = int(time.time())
                 random_code = hashlib.md5(f"{plaintext}{timestamp}".encode()).hexdigest()[:6]
                 mock_enc = f"MOCK_ENC_{timestamp}_{plaintext}_{random_code}"
                 return base64.b64encode(mock_enc.encode()).decode()
             raise
 
-    # ==================== 进件相关API（保持不变） ====================
-
     def _sign(self, method: str, url: str, timestamp: str, nonce_str: str, body: str = '') -> str:
         """RSA-SHA256签名"""
         if self.mock_mode:
-            # 生成模拟签名
             return f"MOCK_SIGN_{hashlib.sha256(f'{method}{url}{timestamp}{nonce_str}{body}'.encode()).hexdigest()[:16]}"
 
         sign_str = f'{method}\n{url}\n{timestamp}\n{nonce_str}\n{body}\n'
@@ -391,14 +445,13 @@ class WeChatPayClient:
         auth_str = f'mchid="{self.mchid}",serial_no="{serial_no}",nonce_str="{nonce_str}",timestamp="{timestamp}",signature="{signature}"'
         return f'WECHATPAY2-SHA256-RSA2048 {auth_str}'
 
-    # ==================== 进件相关API（保持不变） ====================
+    # ==================== 进件相关API ====================
 
     @settlement_rate_limiter
     def submit_applyment(self, applyment_data: Dict[str, Any]) -> Dict[str, Any]:
         """提交进件申请"""
         if self.mock_mode:
             logger.info("【MOCK】模拟提交进件申请")
-            # 模拟生成sub_mchid
             sub_mchid = f"MOCK_SUB_MCHID_{uuid.uuid4().hex[:8].upper()}"
             return {
                 "applyment_id": int(time.time() * 1000),
@@ -470,26 +523,21 @@ class WeChatPayClient:
         return response.json().get('media_id')
 
     def verify_signature(self, signature: str, timestamp: str, nonce: str, body: str) -> bool:
-        """验证回调签名"""
+        """验证回调签名（支持动态加载证书）"""
         if self.mock_mode:
             logger.info("【MOCK】跳过签名验证")
             return True
 
         try:
-            if not os.path.exists(self.platform_cert_path):
-                logger.warning("微信支付平台证书不存在，跳过验签")
-                return True
-
-            with open(self.platform_cert_path, 'rb') as f:
-                platform_key = serialization.load_pem_public_key(
-                    f.read(),
-                    backend=default_backend()
-                )
+            # 如果公钥未加载，尝试重新获取
+            if not self.wechat_public_key:
+                logger.warning("平台公钥未加载，尝试重新获取...")
+                self.wechat_public_key = self._load_wechat_public_key()
 
             message = f"{timestamp}\n{nonce}\n{body}\n"
             signature_bytes = base64.b64decode(signature)
 
-            platform_key.verify(
+            self.wechat_public_key.verify(
                 signature_bytes,
                 message.encode('utf-8'),
                 padding.PKCS1v15(),
@@ -504,7 +552,6 @@ class WeChatPayClient:
         """解密回调数据（AES-256-GCM）"""
         if self.mock_mode:
             logger.info("【MOCK】模拟解密回调数据")
-            # 返回模拟数据
             return {
                 "event_type": "APPLYMENT_STATE_FINISHED",
                 "applyment_id": 123456,
@@ -529,7 +576,7 @@ class WeChatPayClient:
             logger.error(f"解密失败: {str(e)}")
             return json.loads(resource.get("ciphertext", "{}"))
 
-    # ==================== 结算账户相关API（核心功能） ====================
+    # ==================== 结算账户相关API ====================
 
     @query_rate_limiter
     def query_settlement_account(self, sub_mchid: str) -> Dict[str, Any]:
@@ -544,16 +591,11 @@ class WeChatPayClient:
             'Accept': 'application/json'
         }
 
-        # 请求参数：account_number_rule 可选
-        params = {
-            'account_number_rule': 'ACCOUNT_NUMBER_RULE_MASK_V2'  # 使用v2格式：前6位+后4位
-        }
-
+        params = {'account_number_rule': 'ACCOUNT_NUMBER_RULE_MASK_V2'}
         response = self.session.get(self.BASE_URL + url, headers=headers, params=params, timeout=10)
         response.raise_for_status()
         data = response.json()
 
-        # 确保返回数据的完整性
         return {
             'account_type': data.get('account_type'),
             'account_bank': data.get('account_bank'),
@@ -571,9 +613,7 @@ class WeChatPayClient:
         """修改结算账户 - 100%对齐微信接口"""
         if self.mock_mode:
             logger.info(f"【MOCK】提交改绑申请: sub_mchid={sub_mchid}")
-
-            # 模拟随机失败（可配置）
-            mock_result = os.getenv('WX_MOCK_APPLY_RESULT', 'SUCCESS')  # SUCCESS | FAIL | PENDING
+            mock_result = os.getenv('WX_MOCK_APPLY_RESULT', 'SUCCESS')
             if mock_result == 'FAIL':
                 return {
                     'application_no': self._generate_mock_application_no(sub_mchid),
@@ -586,7 +626,6 @@ class WeChatPayClient:
                     'sub_mchid': sub_mchid,
                     'status': 'APPLYMENT_STATE_AUDITING'
                 }
-
             return {
                 'application_no': self._generate_mock_application_no(sub_mchid),
                 'sub_mchid': sub_mchid,
@@ -595,7 +634,6 @@ class WeChatPayClient:
 
         url = f'/v3/apply4sub/sub_merchants/{sub_mchid}/modify-settlement'
 
-        # 构建请求体（严格对齐微信文档）
         body = {
             "account_type": account_info['account_type'],
             "account_bank": account_info['account_bank'][:128],
@@ -606,9 +644,7 @@ class WeChatPayClient:
             "account_name": self._rsa_encrypt_with_wechat_public_key(account_info['account_name'])
         }
 
-        # 过滤空值字段（微信要求）
         body = {k: v for k, v in body.items() if v != ''}
-
         body_str = json.dumps(body, ensure_ascii=False)
         headers = {
             'Authorization': self._build_auth_header('POST', url, body_str),
@@ -620,10 +656,9 @@ class WeChatPayClient:
         response = self.session.post(self.BASE_URL + url, data=body_str.encode('utf-8'), headers=headers, timeout=30)
         response.raise_for_status()
 
-        # 微信返回：{"application_no":"xxx"}
         result = response.json()
         result['sub_mchid'] = sub_mchid
-        result['status'] = 'APPLYMENT_STATE_AUDITING'  # 提交后初始状态
+        result['status'] = 'APPLYMENT_STATE_AUDITING'
         return result
 
     @query_rate_limiter
@@ -639,17 +674,12 @@ class WeChatPayClient:
             'Accept': 'application/json'
         }
 
-        # 请求参数：account_number_rule 可选
-        params = {
-            'account_number_rule': 'ACCOUNT_NUMBER_RULE_MASK_V2'
-        }
-
+        params = {'account_number_rule': 'ACCOUNT_NUMBER_RULE_MASK_V2'}
         response = self.session.get(self.BASE_URL + url, headers=headers, params=params, timeout=30)
         response.raise_for_status()
 
         data = response.json()
 
-        # 确保字段完整性（对齐微信文档）
         return {
             'account_name': data.get('account_name', ''),
             'account_type': data.get('account_type'),
@@ -657,14 +687,14 @@ class WeChatPayClient:
             'bank_name': data.get('bank_name', ''),
             'bank_branch_id': data.get('bank_branch_id', ''),
             'account_number': data.get('account_number', ''),
-            'verify_result': data.get('verify_result'),  # AUDIT_SUCCESS | AUDITING | AUDIT_FAIL
+            'verify_result': data.get('verify_result'),
             'verify_fail_reason': data.get('verify_fail_reason', ''),
             'verify_finish_time': data.get('verify_finish_time', ''),
             'applyment_state': data.get('applyment_state', 'AUDITING'),
             'applyment_state_msg': data.get('applyment_state_msg', '')
         }
 
-    # ==================== 本地加密解密工具（保持不变） ====================
+    # ==================== 本地加密解密工具 ====================
 
     @staticmethod
     def _encrypt_local(plaintext: str, key: bytes) -> str:
@@ -685,20 +715,17 @@ class WeChatPayClient:
     def _decrypt_local_encrypted(self, encrypted_data: str) -> str:
         """实例方法：解密Mock或真实数据"""
         if self.mock_mode:
-            # 解密Mock格式
             try:
                 decoded = base64.b64decode(encrypted_data).decode()
                 if decoded.startswith("MOCK_ENC_"):
-                    # 格式：MOCK_ENC_{timestamp}_{plaintext}_{random}
                     parts = decoded.split('_')
                     if len(parts) >= 4:
-                        return '_'.join(parts[3:-1])  # 还原原文（处理原文含下划线的情况）
-                    return decoded[9:]  # 兼容旧格式
+                        return '_'.join(parts[3:-1])
+                    return decoded[9:]
             except:
                 pass
-            return encrypted_data  # 解密失败返回原文
+            return encrypted_data
 
-        # 真实模式使用静态方法
         key = self.apiv3_key[:32]
         return self._decrypt_local(encrypted_data, key)
 

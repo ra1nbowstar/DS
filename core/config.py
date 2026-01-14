@@ -51,7 +51,7 @@ class Settings(BaseSettings):
     WECHAT_PAY_PLATFORM_CERT_PATH: str = ""
     WECHAT_PAY_PUBLIC_KEY_PATH: str = ""
     WECHAT_PAY_NOTIFY_URL: str = ""
-
+    WECHAT_PAY_PUB_KEY_ID: str = ""
     WX_MCHID: str | None = None
     WX_CERT_SERIAL_NO: str = ""
     WX_APIV3_KEY: str = ""
@@ -240,7 +240,7 @@ WECHAT_PAY_API_KEY_PATH = settings.WECHAT_PAY_API_KEY_PATH
 WECHAT_PAY_PLATFORM_CERT_PATH = settings.WECHAT_PAY_PLATFORM_CERT_PATH
 WECHAT_PAY_PUBLIC_KEY_PATH = settings.WECHAT_PAY_PUBLIC_KEY_PATH
 WECHAT_PAY_NOTIFY_URL = settings.WECHAT_PAY_NOTIFY_URL
-
+WECHAT_PAY_PUB_KEY_ID = settings.WECHAT_PAY_PUB_KEY_ID
 # 向后兼容：某些模块仍然使用 `WX_MCHID` 名称
 from typing import Final
 # 向后兼容：某些模块仍然使用 `WX_MCHID` 名称
