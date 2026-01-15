@@ -478,6 +478,72 @@ class WeChatPayClient:
         response.raise_for_status()
         return response.json().get('media_id')
 
+    # ==================== 下单与前端支付参数生成 ====================
+    def create_jsapi_order(self, out_trade_no: str, total_fee: int, openid: str, description: str = "商品支付", notify_url: Optional[str] = None) -> Dict[str, Any]:
+        """创建 JSAPI 订单（/v3/pay/transactions/jsapi），返回微信下单响应（包含 prepay_id）"""
+        if self.mock_mode:
+            logger.info(f"【MOCK】创建JSAPI订单: out_trade_no={out_trade_no}, total_fee={total_fee}, openid={openid}")
+            return {"prepay_id": f"MOCK_PREPAY_{int(time.time())}_{uuid.uuid4().hex[:8]}"}
+
+        url = '/v3/pay/transactions/jsapi'
+        body = {
+            "appid": WECHAT_APP_ID,
+            "mchid": self.mchid,
+            "description": description,
+            "out_trade_no": out_trade_no,
+            "notify_url": notify_url or os.getenv('WECHAT_PAY_NOTIFY_URL', ''),
+            "amount": {"total": int(total_fee), "currency": "CNY"},
+            "payer": {"openid": openid}
+        }
+
+        body_str = json.dumps(body, ensure_ascii=False)
+        headers = {
+            'Authorization': self._build_auth_header('POST', url, body_str),
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+            'Wechatpay-Serial': self._get_merchant_serial_no()
+        }
+
+        response = self.session.post(self.BASE_URL + url, data=body_str.encode('utf-8'), headers=headers, timeout=15)
+        response.raise_for_status()
+        return response.json()
+
+    def generate_jsapi_pay_params(self, prepay_id: str) -> Dict[str, str]:
+        """根据 prepay_id 生成小程序/JSAPI 前端所需的支付参数（含 paySign）。
+
+        sign 格式（V3）对齐：
+        sign_str = appid + "\n" + timestamp + "\n" + nonceStr + "\n" + package + "\n"
+        使用商户私钥 RSA-SHA256 签名，base64 编码
+        """
+        if not prepay_id:
+            raise ValueError("prepay_id 为空")
+
+        timestamp = str(int(time.time()))
+        nonce_str = str(uuid.uuid4()).replace('-', '')
+        pkg = f"prepay_id={prepay_id}"
+
+        sign_str = f"{WECHAT_APP_ID}\n{timestamp}\n{nonce_str}\n{pkg}\n"
+
+        if not self.private_key:
+            raise RuntimeError("商户私钥未加载，无法生成 paySign")
+
+        signature = self.private_key.sign(
+            sign_str.encode('utf-8'),
+            padding.PKCS1v15(),
+            hashes.SHA256()
+        )
+
+        pay_sign = base64.b64encode(signature).decode('utf-8')
+
+        return {
+            "appId": WECHAT_APP_ID,
+            "timeStamp": timestamp,
+            "nonceStr": nonce_str,
+            "package": pkg,
+            "signType": "RSA",
+            "paySign": pay_sign
+        }
+
     def verify_signature(self, signature: str, timestamp: str, nonce: str, body: str) -> bool:
         """验证回调签名（支持动态加载证书）"""
         if self.mock_mode:
