@@ -41,7 +41,8 @@ def _validate_placeholder_count(sql_fragment: Optional[str], params: List[Any]):
         return
     placeholder_count = sql_fragment.count("%s")
     if placeholder_count != len(params):
-        raise HTTPException(status_code=400, detail=f"SQL 占位符数量({placeholder_count})与参数数量({len(params)})不匹配")
+        raise HTTPException(status_code=400,
+                            detail=f"SQL 占位符数量({placeholder_count})与参数数量({len(params)})不匹配")
 
 
 def _safe_concat_or(conds: List[str]) -> str:
@@ -778,6 +779,81 @@ def update_product(id: int, payload: ProductUpdate):
                 raise HTTPException(status_code=400, detail=f"更新商品失败: {str(e)}")
 
 
+@router.delete("/products/{id}", summary="🗑️ 删除商品")
+def delete_product(id: int):
+    """
+    删除指定商品及其所有关联数据（SKU、属性、轮播图、订单项等）
+    注意：此操作会级联删除所有相关数据，且不可撤销！
+    """
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            try:
+                # 检查商品是否存在
+                select_sql = build_dynamic_select(
+                    cur,
+                    "products",
+                    where_clause="id = %s"
+                )
+                cur.execute(select_sql, (id,))
+                product = cur.fetchone()
+                if not product:
+                    raise HTTPException(status_code=404, detail="商品不存在")
+
+                # ✅ 获取图片列表用于后续删除物理文件
+                raw_main = product.get('main_image', '[]')
+                raw_detail = product.get('detail_images', '[]')
+
+                image_urls_to_delete = []
+                try:
+                    if isinstance(raw_main, str) and raw_main.strip().startswith('['):
+                        image_urls_to_delete.extend(json.loads(raw_main))
+                    elif isinstance(raw_main, list):
+                        image_urls_to_delete.extend(raw_main)
+                except:
+                    pass
+
+                try:
+                    if isinstance(raw_detail, str) and raw_detail.strip().startswith('['):
+                        image_urls_to_delete.extend(json.loads(raw_detail))
+                    elif isinstance(raw_detail, list):
+                        image_urls_to_delete.extend(raw_detail)
+                except:
+                    pass
+
+                # 执行删除操作（外键会级联删除关联数据）
+                cur.execute("DELETE FROM products WHERE id = %s", (id,))
+
+                # 检查是否成功删除
+                if cur.rowcount == 0:
+                    raise HTTPException(status_code=404, detail="商品删除失败或已被删除")
+
+                conn.commit()
+
+                # ✅ 异步删除物理文件（不影响主流程）
+                if image_urls_to_delete:
+                    from pathlib import Path
+                    for url in image_urls_to_delete:
+                        try:
+                            relative_path = url.lstrip('/').replace('pic/', '', 1)
+                            file_path = Path(str(BASE_PIC_DIR)) / relative_path
+                            if file_path.exists():
+                                file_path.unlink()
+                                print(f"✅ 已删除商品图片文件: {file_path}")
+                        except Exception as e:
+                            print(f"⚠️ 删除图片文件失败 {url}: {e}")
+
+                return {
+                    "status": "success",
+                    "message": f"商品 {id} 已成功删除",
+                    "data": {"product_id": id}
+                }
+            except HTTPException:
+                raise
+            except Exception as e:
+                conn.rollback()
+                raise HTTPException(status_code=400, detail=f"删除商品失败: {str(e)}")
+
+
 @router.post("/products/{id}/images", summary="📸 上传商品图片")
 def upload_images(
         id: int,
@@ -973,7 +1049,7 @@ def get_sales_data(id: int):
 
             row = cur.fetchone()
             if not row or not row.get('qty'):
-            # 如果没有销售数据或查询结果为 NULL，返回 0 而不是 404
+                # 如果没有销售数据或查询结果为 NULL，返回 0 而不是 404
                 qty = int(row['qty']) if row and row.get('qty') else 0
                 sales = float(row['sales']) if row and row.get('sales') else 0.0
 
