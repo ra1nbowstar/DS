@@ -647,6 +647,7 @@ class FinanceService:
         # ===================================================
 
         total_distributed = Decimal('0')
+        referral_paid = False  # 防止推荐奖励和团队奖励同时触发
 
         # 1. 推荐奖励（首次购买 + 推荐人必须是星级会员）
         if old_level == 0:  # 只有0星升1星时才发推荐奖励
@@ -695,11 +696,18 @@ class FinanceService:
 
                     logger.info(f"推荐奖励发放: 用户{referrer['referrer_id']}({referrer_level}星) +{reward_amount:.2f}")
                     total_distributed += reward_amount
+                    referral_paid = True
                 else:
                     logger.debug(f"推荐人{referrer['referrer_id']}不是星级会员({referrer_level}星)，不发放推荐奖励")
             else:
                 logger.debug("购买者无推荐人，跳过推荐奖励")
 
+        # 2. 团队奖励（只为新达到的层级发放；0→1 也发放），且不与推荐奖励同发
+        if referral_paid:
+            logger.debug("已发放推荐奖励，本次跳过团队奖励")
+            return
+
+        # 继续判断是否提升等级
         # 2. 团队奖励（只为新达到的层级发放；0→1 也发放）
         if new_level <= old_level:
             logger.debug("等级未提升，不产生团队奖励")
