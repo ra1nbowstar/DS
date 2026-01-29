@@ -1553,17 +1553,34 @@ class FinanceService:
 
     def _add_pool_balance(self, cur, account_type: str, amount: Decimal, remark: str,
                           related_user: Optional[int] = None) -> Decimal:
-        # 如果是扣减操作，先检查余额
-        if amount < 0:
-            self._ensure_pool_balance(account_type, abs(amount))
+        # 使用同一个事务读写，避免跨连接导致未提交余额不可见
+        cur.execute("SELECT balance FROM finance_accounts WHERE account_type = %s FOR UPDATE", (account_type,))
+        row = cur.fetchone()
+        current_balance = Decimal(str(row['balance'] if row and row['balance'] is not None else 0)) if row else Decimal('0')
 
-        # 执行余额更新（使用原子操作）
+        # 若账户不存在则先创建，初始余额按当前余额（0）+amount
+        if not row:
+            cur.execute(
+                "INSERT INTO finance_accounts (account_type, balance) VALUES (%s, %s)",
+                (account_type, current_balance)
+            )
+
+        # 扣减前校验余额充足（含本事务内最新余额）
+        if amount < 0 and current_balance + amount < 0:
+            raise InsufficientBalanceException(
+                f"finance_account:{account_type}",
+                abs(amount),
+                current_balance,
+                message=f"资金池 {account_type} 余额不足，当前: {current_balance:.4f}，需要扣减: {abs(amount):.4f}"
+            )
+
+        # 执行余额更新
         cur.execute(
             "UPDATE finance_accounts SET balance = balance + %s WHERE account_type = %s",
             (amount, account_type)
         )
 
-        # 获取更新后的余额
+        # 获取更新后的余额（同一事务）
         cur.execute("SELECT balance FROM finance_accounts WHERE account_type = %s", (account_type,))
         row = cur.fetchone()
         balance_after = Decimal(str(row['balance'] if row and row['balance'] is not None else 0))
