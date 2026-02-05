@@ -158,7 +158,7 @@ class ProductCreate(BaseModel):
     name: str
     description: Optional[str] = None
     category: str
-    user_id: Optional[int] = None
+    user_id: int
     is_member_product: bool = False
     buy_rule: Optional[str] = None
     freight: Optional[float] = Field(0.0, ge=0, le=0, description="运费，系统强制0")
@@ -468,6 +468,16 @@ def get_product(id: int):
 def add_product(payload: ProductCreate):
     with get_conn() as conn:
         with conn.cursor() as cur:
+            # ✅ 新增：校验是否为商家或平台
+            if payload.user_id:
+                cur.execute("SELECT is_merchant FROM users WHERE id = %s", (payload.user_id,))
+                user = cur.fetchone()
+                if not user:
+                    raise HTTPException(status_code=404, detail="用户不存在")
+
+                merchant_type = user.get('is_merchant', 0)
+                if merchant_type not in [1, 2]:  # 明确：1=商家, 2=平台都可以
+                    raise HTTPException(status_code=403, detail="该用户不是商家或平台，无法发布商品")
             try:
                 # 处理会员商品价格: 强制所有SKU价格为1980
                 sku_prices = []
@@ -1382,3 +1392,108 @@ def update_images(
             except Exception as e:
                 conn.rollback()
                 raise HTTPException(status_code=400, detail=f"更新图片失败: {str(e)}")
+
+
+# ============================================================
+# 新增：根据用户ID查询商品列表（仅商家/平台可查询）
+# ============================================================
+
+@router.get("/users/{user_id}/products", summary="👤 查询用户的所有商品")
+def get_user_products(
+        user_id: int,
+        status: Optional[int] = Query(None, description="商品状态筛选"),
+        page: int = Query(1, ge=1, description="页码"),
+        size: int = Query(10, ge=1, le=100, description="每页条数"),
+):
+    """
+    根据用户ID查询该用户发布的所有商品
+
+    权限要求：该用户必须是商家(is_merchant=1)或平台(is_merchant=2)
+    """
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            # 1. 验证用户是否存在
+            cur.execute("SELECT id, name, is_merchant FROM users WHERE id = %s", (user_id,))
+            user = cur.fetchone()
+            if not user:
+                raise HTTPException(status_code=404, detail="用户不存在")
+
+            # 2. 验证用户权限（仅商家或平台可查询）
+            merchant_type = user.get('is_merchant', 0)
+            if merchant_type not in [1, 2]:
+                raise HTTPException(
+                    status_code=403,
+                    detail="该用户不是商家或平台，无法查询商品"
+                )
+
+            # 3. 构建查询条件
+            where_clauses = ["p.user_id = %s"]
+            params = [user_id]
+
+            if status is not None:
+                where_clauses.append("p.status = %s")
+                params.append(status)
+
+            where_sql = " AND ".join(where_clauses)
+
+            # 4. 查询总数
+            cur.execute(f"""
+                SELECT COUNT(*) as total 
+                FROM products p
+                WHERE {where_sql}
+            """, tuple(params))
+            total = cur.fetchone()['total']
+
+            # 5. 查询商品列表（关联商家信息）
+            offset = (page - 1) * size
+            cur.execute(f"""
+                SELECT p.*, u.name as merchant_name
+                FROM products p
+                LEFT JOIN users u ON u.id = p.user_id
+                WHERE {where_sql}
+                ORDER BY p.id DESC
+                LIMIT %s OFFSET %s
+            """, tuple(params + [size, offset]))
+            products = cur.fetchall()
+
+            # 6. 获取每个商品的 SKUs 和 attributes
+            result_data = []
+            for product in products:
+                product_id = product['id']
+
+                # 获取 SKUs
+                select_sql = build_dynamic_select(
+                    cur,
+                    "product_skus",
+                    where_clause="product_id = %s",
+                    select_fields=["id", "sku_code", "price", "original_price", "stock", "specifications"]
+                )
+                cur.execute(select_sql, (product_id,))
+                skus = cur.fetchall()
+                skus = [{"id": s['id'], "sku_code": s['sku_code'], "price": float(s['price']),
+                         "original_price": float(s['original_price']) if s['original_price'] else None,
+                         "stock": s['stock'], "specifications": s['specifications']} for s in skus]
+
+                # 获取 attributes
+                select_sql = build_dynamic_select(
+                    cur,
+                    "product_attributes",
+                    where_clause="product_id = %s",
+                    select_fields=["name", "value"]
+                )
+                cur.execute(select_sql, (product_id,))
+                attributes = cur.fetchall()
+                attributes = [{"name": a['name'], "value": a['value']} for a in attributes]
+
+                result_data.append(build_product_dict(product, skus, attributes))
+
+            return {
+                "status": "success",
+                "user_id": user_id,
+                "user_name": user.get('name'),
+                "user_type": "商家" if merchant_type == 1 else "平台",
+                "total": total,
+                "page": page,
+                "size": size,
+                "data": result_data
+            }
