@@ -214,17 +214,16 @@ class WechatApplymentService:
                     applyment_id = response.get("applyment_id")
 
                     # 更新状态
-                    update_data = {
+                    final_update_data = {
                         "applyment_id": applyment_id,
                         "applyment_state": "APPLYMENT_STATE_AUDITING",
                         "is_draft": 0,
                         "submitted_at": datetime.datetime.now(),
                         "updated_at": datetime.datetime.now()
                     }
-                    update_sql = build_dynamic_update(cur, "wx_applyment", update_data, "id = %s")
-                    # 关键修复：合并SET参数和WHERE参数
-                    params = list(update_data.values()) + [applyment["id"]]
-                    cur.execute(update_sql, tuple(params))
+                    final_update_sql = build_dynamic_update(cur, "wx_applyment", final_update_data, "id = %s")
+                    final_params = list(final_update_data.values()) + [applyment["id"]]
+                    cur.execute(final_update_sql, tuple(final_params))
 
                     # 记录日志
                     self._log_state_change(cur, applyment["id"], applyment["business_code"],
@@ -512,16 +511,28 @@ class WechatApplymentService:
                 if not self._check_reject_issues_fixed(cur, applyment_id):
                     raise HTTPException(status_code=400, detail="请先根据驳回原因修改信息")
 
-                # 调用微信支付API重新提交
-                response = self.pay_client.submit_applyment(applyment)
+                # ✅ 修复：准备提交数据（从数据库记录构建）
+                submit_data = {
+                    "business_code": applyment["business_code"],
+                    "subject_info": applyment["subject_info"],
+                    "contact_info": applyment["contact_info"],
+                    "bank_account_info": applyment["bank_account_info"]
+                }
 
-                # 更新状态
+                # 调用微信支付API重新提交
+                response = self.pay_client.submit_applyment(submit_data)
+                wx_applyment_id = response.get("applyment_id")
+
+                # ✅ 修复：更新更多字段
                 update_data = {
+                    "applyment_id": wx_applyment_id,  # 微信申请单号
                     "applyment_state": "APPLYMENT_STATE_AUDITING",
+                    "applyment_state_msg": response.get("state_msg"),  # 新状态消息
+                    "audit_detail": None,  # 清空驳回详情
+                    "submitted_at": datetime.datetime.now(),  # 提交时间
                     "updated_at": datetime.datetime.now()
                 }
                 update_sql = build_dynamic_update(cur, "wx_applyment", update_data, "id = %s")
-                # 关键修复：合并SET参数和WHERE参数
                 params = list(update_data.values()) + [applyment_id]
                 cur.execute(update_sql, tuple(params))
 
@@ -531,8 +542,8 @@ class WechatApplymentService:
                                        "USER", "用户重新提交")
 
                 conn.commit()
-                logger.info(f"用户 {user_id} 重新提交进件: {applyment_id}")
-                return {"applyment_id": applyment_id}
+                logger.info(f"用户 {user_id} 重新提交进件: {applyment_id}, 微信单号: {wx_applyment_id}")
+                return {"applyment_id": applyment_id, "wx_applyment_id": wx_applyment_id}
 
     def get_merchant_info(self, user_id: int) -> dict:
         """获取商户号信息"""
