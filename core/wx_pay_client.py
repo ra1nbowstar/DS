@@ -442,17 +442,97 @@ class WeChatPayClient:
         subject_info = safe_json_loads(applyment_data.get("subject_info", {}))
         contact_info = safe_json_loads(applyment_data.get("contact_info", {}))
         bank_account_info = safe_json_loads(applyment_data.get("bank_account_info", {}))
+        business_info = safe_json_loads(applyment_data.get("business_info", {}))
 
-        # ✅ 修复：构建 business_info（必需字段）
-        business_info = subject_info.get("business_info", {})
+        # ✅ 补齐 subject_type（微信必填字段），从表字段或已有值回填
+        subject_type = applyment_data.get("subject_type") or subject_info.get("subject_type")
+        subject_info["subject_type"] = subject_type or "SUBJECT_TYPE_INDIVIDUAL"
+
+        # ✅ 规整 identity_info.id_holder_type，微信只接受合法枚举
+        identity_info = subject_info.get("identity_info", {}) or {}
+        if isinstance(identity_info, str):
+            try:
+                identity_info = json.loads(identity_info)
+            except Exception:
+                identity_info = {}
+
+        id_holder_type = identity_info.get("id_holder_type")
+        allowed_id_holder_types = {"LEGAL", "SUPER"}
+
+        # 微信要求个体/企业不传 id_holder_type，避免触发枚举校验
+        if subject_type in {"SUBJECT_TYPE_INDIVIDUAL", "SUBJECT_TYPE_ENTERPRISE"}:
+            identity_info.pop("id_holder_type", None)
+        elif id_holder_type and id_holder_type not in allowed_id_holder_types:
+            # 对其他主体仅接受官方枚举，非法值回落为 LEGAL
+            identity_info["id_holder_type"] = "LEGAL"
+
+        # ✅ 加密并回填身份证信息（姓名、号码、介质media_id）
+        id_card_info = identity_info.get("id_card_info") or {}
+
+        raw_id_card_name = identity_info.get("id_card_name") or subject_info.get("name")
+        raw_id_card_number = identity_info.get("id_card_number") or subject_info.get("id_number")
+
+        if raw_id_card_name:
+            try:
+                id_card_info["id_card_name"] = self.encrypt_sensitive_data(str(raw_id_card_name))
+            except Exception:
+                logger.warning("身份证姓名加密失败，原文将被丢弃以避免提交非法值")
+
+        if raw_id_card_number:
+            try:
+                id_card_info["id_card_number"] = self.encrypt_sensitive_data(str(raw_id_card_number))
+            except Exception:
+                logger.warning("身份证号码加密失败，原文将被丢弃以避免提交非法值")
+
+        # 回填身份证有效期（不加密），优先使用 id_card_info 现有值，再回退主体/身份信息
+        raw_card_period_begin = (
+            id_card_info.get("card_period_begin")
+            or identity_info.get("card_period_begin")
+            or subject_info.get("card_period_begin")
+        )
+        raw_card_period_end = (
+            id_card_info.get("card_period_end")
+            or identity_info.get("card_period_end")
+            or subject_info.get("card_period_end")
+        )
+
+        if raw_card_period_begin:
+            id_card_info["card_period_begin"] = str(raw_card_period_begin)
+        if raw_card_period_end:
+            id_card_info["card_period_end"] = str(raw_card_period_end)
+
+        if id_card_info:
+            identity_info["id_card_info"] = id_card_info
+
+        # 移除未加密的明文字段，避免被微信校验为空或非法
+        identity_info.pop("id_card_name", None)
+        identity_info.pop("id_card_number", None)
+
+        # 调试日志：确认身份证信息关键字段是否存在（已加密，不含明文）
+        log_id_card_info = identity_info.get("id_card_info", {})
+        logger.info(
+            "【submit_applyment】id_card_info keys=%s, card_period_begin=%s, card_period_end=%s",
+            list(log_id_card_info.keys()),
+            log_id_card_info.get("card_period_begin"),
+            log_id_card_info.get("card_period_end"),
+        )
+
+        # 写回 subject_info，确保清洗生效
+        subject_info["identity_info"] = identity_info
+
+        # ✅ 修复：构建 business_info（必需字段），优先使用前端/DB传入
         if not business_info:
-            # 从 subject_info 或 contact_info 中提取构建
-            business_info = {
-                "merchant_shortname": subject_info.get("merchant_shortname", "") or subject_info.get("business_name",
-                                                                                                     ""),
-                "service_phone": contact_info.get("mobile", "") or contact_info.get("service_phone", ""),
-                "business_category": subject_info.get("business_category", [])
-            }
+            business_info = subject_info.get("business_info", {}) or {}
+
+        # 保证必填的 merchant_shortname 与 service_phone 不为空
+        if not business_info.get("merchant_shortname"):
+            business_info["merchant_shortname"] = subject_info.get("merchant_shortname") or subject_info.get("name") or subject_info.get("business_name") or ""
+        if not business_info.get("service_phone"):
+            business_info["service_phone"] = contact_info.get("mobile") or contact_info.get("mobile_phone") or contact_info.get("service_phone") or ""
+
+        # 兜底业务类目
+        if not business_info.get("business_category"):
+            business_info["business_category"] = subject_info.get("business_category", [])
 
         # ✅ 确保 business_category 是数组
         if isinstance(business_info.get("business_category"), str):

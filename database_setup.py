@@ -288,7 +288,7 @@ class DatabaseManager:
                     user_id BIGINT UNSIGNED NOT NULL,
                     change_amount DECIMAL(12,4) NOT NULL,
                     balance_after DECIMAL(12,4) NOT NULL,
-                    type ENUM('member','merchant') NOT NULL,
+                    type ENUM('member','merchant','company') NOT NULL,
                     reason VARCHAR(255),
                     related_order BIGINT UNSIGNED,
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
