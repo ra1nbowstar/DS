@@ -273,3 +273,7 @@ PUSH_TEMPLATE_ID_APPLYMENT = settings.PUSH_TEMPLATE_ID_APPLYMENT        # 新增
 ENVIRONMENT: Final[str] = settings.ENVIRONMENT
 
 QRCODE_EXPIRE_SECONDS: Final[int] = settings.qrcode_expire_seconds
+
+# 微信支付进件结算规则ID（必填，从服务商后台获取）
+# 默认值为 76011，生产环境请在 .env 文件中配置 WX_SETTLE_RULE_ID
+WX_SETTLE_RULE_ID: str = os.getenv('WX_SETTLE_RULE_ID', '76011')

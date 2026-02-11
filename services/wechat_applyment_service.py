@@ -687,11 +687,22 @@ class WechatApplymentService:
                     raise HTTPException(status_code=400, detail="请先根据驳回原因修改信息")
 
                 # ✅ 修复：准备提交数据（从数据库记录构建）
+                # 解析可能为JSON字符串的字段
+                subject_info = applyment["subject_info"]
+                if isinstance(subject_info, str):
+                    subject_info = json.loads(subject_info)
+
+                business_info = applyment.get("business_info") or {}
+                if isinstance(business_info, str):
+                    business_info = json.loads(business_info)
+
                 submit_data = {
                     "business_code": applyment["business_code"],
-                    "subject_info": applyment["subject_info"],
+                    "subject_type": applyment.get("subject_type", "SUBJECT_TYPE_INDIVIDUAL"),
+                    "subject_info": subject_info,
                     "contact_info": applyment["contact_info"],
-                    "bank_account_info": applyment["bank_account_info"]
+                    "bank_account_info": applyment["bank_account_info"],
+                    "business_info": business_info
                 }
 
                 # 调用微信支付API重新提交

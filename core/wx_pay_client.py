@@ -20,7 +20,8 @@ from core.config import (
     WECHAT_PAY_MCH_ID, WECHAT_PAY_API_V3_KEY,
     WECHAT_PAY_API_CERT_PATH, WECHAT_PAY_API_KEY_PATH,
     WECHAT_PAY_PUBLIC_KEY_PATH, WECHAT_PAY_PUB_KEY_ID,
-    WECHAT_APP_ID, WECHAT_APP_SECRET, ENVIRONMENT
+    WECHAT_APP_ID, WECHAT_APP_SECRET, ENVIRONMENT,
+    WX_SETTLE_RULE_ID
 )
 from core.database import get_conn
 from core.logging import get_logger
@@ -546,7 +547,8 @@ class WeChatPayClient:
             "contact_info": contact_info,
             "subject_info": subject_info,
             "bank_account_info": bank_account_info,
-            "business_info": business_info  # ✅ 添加必需字段
+            "business_info": business_info,  # ✅ 添加必需字段
+            "settlement_info": {"settle_rule_id": WX_SETTLE_RULE_ID}  # ✅ 添加结算规则（微信必填）
         }
 
         # ✅ 修复：清理空值和敏感数据（微信 API 对空字符串敏感）
