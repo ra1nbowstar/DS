@@ -249,19 +249,71 @@ class OfflineService:
     
     # ---------- 5. 订单列表 ----------
     @staticmethod
-    async def list_orders(merchant_id: int, page: int, size: int):
-        current_user_id = str(merchant_id)  # merchant_id 即当前登录用户 UUID
+    async def list_orders(
+        merchant_id: Optional[int] = None, 
+        user_id: Optional[int] = None, 
+        page: int = 1, 
+        size: int = 20
+    ):
+        """
+        查询订单列表，支持按商家ID（卖方）或用户ID（买方）查询
+        
+        Args:
+            merchant_id: 商家ID（卖方），与 user_id 互斥
+            user_id: 用户ID（买方），与 merchant_id 互斥
+            page: 页码，从1开始
+            size: 每页数量
+        """
+        # 参数校验
+        if not merchant_id and not user_id:
+            raise ValueError("请传入 merchant_id 或 user_id 其中一个参数")
+        if merchant_id and user_id:
+            raise ValueError("merchant_id 和 user_id 不能同时传入")
+        
         offset = (page - 1) * size
+        
         with get_conn() as conn:
             with conn.cursor(pymysql.cursors.DictCursor) as cur:
-                cur.execute(
-                    "SELECT order_no,store_name,amount,status,created_at "
-                    "FROM offline_order WHERE merchant_id=%s "
-                    "ORDER BY id DESC LIMIT %s OFFSET %s",
-                    (current_user_id, size, offset)
+                # 动态构建查询条件
+                if merchant_id:
+                    # 按商家查询（卖方视角）
+                    current_user_id = str(merchant_id)
+                    where_clause = "WHERE merchant_id=%s"
+                    params = (current_user_id, size, offset)
+                else:
+                    # 按用户查询（买方视角）
+                    current_user_id = str(user_id)
+                    where_clause = "WHERE user_id=%s"
+                    params = (current_user_id, size, offset)
+                
+                # 查询总数
+                count_sql = f"SELECT COUNT(*) as total FROM offline_order {where_clause}"
+                cur.execute(count_sql, (params[0],))
+                total = cur.fetchone()["total"]
+                
+                # 查询分页数据
+                data_sql = (
+                    "SELECT order_no,store_name,amount,paid_amount,status,"
+                    "coupon_id,coupon_discount,created_at,pay_time "
+                    f"FROM offline_order {where_clause} "
+                    "ORDER BY id DESC LIMIT %s OFFSET %s"
                 )
+                cur.execute(data_sql, params)
                 rows = cur.fetchall()
-        return {"list": rows, "page": page, "size": size}
+                
+                # 格式化金额（分转元）
+                for row in rows:
+                    row["amount_yuan"] = row["amount"] / 100 if row["amount"] else 0
+                    row["paid_amount_yuan"] = row["paid_amount"] / 100 if row.get("paid_amount") else 0
+                    row["coupon_discount_yuan"] = row["coupon_discount"] / 100 if row.get("coupon_discount") else 0
+        
+        return {
+            "list": rows, 
+            "page": page, 
+            "size": size,
+            "total": total,
+            "total_pages": (total + size - 1) // size
+        }
 
     # ---------- 6. 退款 ----------
     @staticmethod

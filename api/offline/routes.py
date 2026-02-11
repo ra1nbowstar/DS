@@ -110,6 +110,10 @@ async def unified_order(
     coupon_id: Optional[int] = Query(None, description="优惠券ID（可选）"),
     current_user: dict = Depends(get_current_user)  # 当前扫码支付的用户（顾客）
 ):
+    openid = current_user.get("openid")
+    if not openid:
+        logger.error(f"用户 {current_user['id']} 未绑定微信 openid")
+        raise HTTPException(status_code=400, detail="用户未绑定微信，无法支付")
     try:
         # ====== 关键新增：获取支付用户的微信 openid ======
         openid = current_user.get("openid")
@@ -155,20 +159,30 @@ async def pay_notify(request: Request):
 
 
 # ------------------ 6. 订单列表 ------------------
-@router.get("/dingdan/liebiao", summary="订单列表")
+@router.get("/dingdan/liebiao", summary="订单列表（支持买方或卖方查询）")
 async def list_orders(
-    merchant_id: int,
+    merchant_id: Optional[int] = Query(None, description="商家ID（卖方）"),
+    user_id: Optional[int] = Query(None, description="用户ID（买方）"),
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=200),
     current_user: dict = Depends(get_current_user)
 ):
+    # 参数校验：必须传 merchant_id 或 user_id 其中一个
+    if not merchant_id and not user_id:
+        raise HTTPException(status_code=400, detail="请传入 merchant_id 或 user_id 其中一个参数")
+    if merchant_id and user_id:
+        raise HTTPException(status_code=400, detail="merchant_id 和 user_id 不能同时传入")
+    
     try:
         result = await OfflineService.list_orders(
             merchant_id=merchant_id,
+            user_id=user_id,
             page=page,
             size=size
         )
         return {"code": 0, "message": "查询成功", "data": result}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"订单列表查询失败: {e}")
         raise HTTPException(status_code=400, detail=str(e))

@@ -836,7 +836,21 @@ class DatabaseManager:
                 'is_timeout_alerted': "is_timeout_alerted TINYINT(1) NOT NULL DEFAULT 0 COMMENT '审核超时提醒是否已发送'",
                 'card_period_begin': "card_period_begin VARCHAR(32) NULL COMMENT '身份证有效期开始（可存长期）'",
                 'card_period_end': "card_period_end VARCHAR(32) NULL COMMENT '身份证有效期结束（可存长期）'",
-            }
+            },
+            'offline_order': {
+                'coupon_id': "coupon_id INT NULL COMMENT '使用的优惠券ID'",
+                'coupon_discount': "coupon_discount INT DEFAULT 0 COMMENT '优惠券抵扣金额（分）'",
+                'paid_amount': "paid_amount INT DEFAULT 0 COMMENT '实付金额（分，优惠后）'",
+                'user_id': "user_id BIGINT UNSIGNED NULL COMMENT '付款用户ID（可空）'",
+                'openid': "openid VARCHAR(64) DEFAULT NULL COMMENT '付款人 openid（可选）'",
+                'transaction_id': "transaction_id VARCHAR(64) DEFAULT NULL COMMENT '微信/支付宝交易号'",
+                'refund_id': "refund_id VARCHAR(64) DEFAULT NULL COMMENT '微信/支付宝退款单号'",
+                'refund_time': "refund_time DATETIME NULL COMMENT '退款完成时间'",
+                'pay_time': "pay_time DATETIME NULL COMMENT '微信/支付宝支付成功时间'",
+                'related_order_no': "related_order_no VARCHAR(50) DEFAULT NULL COMMENT '关联主订单号'",
+                'refresh_count': "refresh_count TINYINT NOT NULL DEFAULT 0 COMMENT '已刷新次数'",
+                'qrcode_expire': "qrcode_expire DATETIME DEFAULT NULL COMMENT '码过期时间'",
+            },
         }
         
         for table_name, sql in tables.items():
