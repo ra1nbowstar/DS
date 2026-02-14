@@ -26,6 +26,7 @@ from core.config import (
 from core.database import get_conn
 from core.logging import get_logger
 from core.rate_limiter import settlement_rate_limiter, query_rate_limiter
+from core.config import WECHAT_PAY_SP_MCH_ID
 
 logger = get_logger(__name__)
 
@@ -397,17 +398,27 @@ class WeChatPayClient:
         )
         return base64.b64encode(signature).decode('utf-8')
 
-    def _build_auth_header(self, method: str, url: str, body: str = '') -> str:
-        """构建 Authorization 请求头（严格对齐微信规范）"""
+    def _build_auth_header(self, method: str, url: str, body: str = '', mchid: str = None) -> str:
+        """构建 Authorization 请求头（严格对齐微信规范）
+
+        Args:
+            method: HTTP 方法
+            url: 请求路径
+            body: 请求体
+            mchid: 商户号（可选，默认使用初始化时的商户号）
+                  在服务商模式下，应传入服务商商户号（SP_MCH_ID）
+        """
         timestamp = str(int(time.time()))
         nonce_str = str(uuid.uuid4()).replace('-', '')
         signature = self._sign(method, url, timestamp, nonce_str, body)
-        serial_no = self._get_merchant_serial_no()
+
+        # 使用传入的商户号，或默认使用初始化时的商户号
+        use_mchid = mchid or self.mchid
 
         # 参数值中的双引号需要转义，且格式严格对齐
         auth_params = [
-            f'mchid="{self.mchid}"',
-            f'serial_no="{serial_no}"',
+            f'mchid="{use_mchid}"',
+            f'serial_no="{self._get_merchant_serial_no()}"',
             f'nonce_str="{nonce_str}"',
             f'timestamp="{timestamp}"',
             f'signature="{signature}"'
@@ -418,8 +429,12 @@ class WeChatPayClient:
     # ==================== 进件相关API ====================
 
     @settlement_rate_limiter
-    def submit_applyment(self, applyment_data: Dict[str, Any]) -> Dict[str, Any]:
-        """提交进件申请"""
+    def submit_applyment(self, applyment_data: Dict[str, Any], is_sub_merchant: bool = True) -> Dict[str, Any]:
+        """
+        提交进件申请
+        - is_sub_merchant=True: 作为二级子商户进件（使用服务商模式，需要platform_appid）
+        - is_sub_merchant=False: 作为普通商户进件（兼容旧逻辑）
+        """
         if self.mock_mode:
             logger.info("【MOCK】模拟提交进件申请")
             sub_mchid = f"MOCK_SUB_MCHID_{uuid.uuid4().hex[:8].upper()}"
@@ -487,14 +502,14 @@ class WeChatPayClient:
 
         # 回填身份证有效期（不加密），优先使用 id_card_info 现有值，再回退主体/身份信息
         raw_card_period_begin = (
-            id_card_info.get("card_period_begin")
-            or identity_info.get("card_period_begin")
-            or subject_info.get("card_period_begin")
+                id_card_info.get("card_period_begin")
+                or identity_info.get("card_period_begin")
+                or subject_info.get("card_period_begin")
         )
         raw_card_period_end = (
-            id_card_info.get("card_period_end")
-            or identity_info.get("card_period_end")
-            or subject_info.get("card_period_end")
+                id_card_info.get("card_period_end")
+                or identity_info.get("card_period_end")
+                or subject_info.get("card_period_end")
         )
 
         if raw_card_period_begin:
@@ -527,9 +542,11 @@ class WeChatPayClient:
 
         # 保证必填的 merchant_shortname 与 service_phone 不为空
         if not business_info.get("merchant_shortname"):
-            business_info["merchant_shortname"] = subject_info.get("merchant_shortname") or subject_info.get("name") or subject_info.get("business_name") or ""
+            business_info["merchant_shortname"] = subject_info.get("merchant_shortname") or subject_info.get(
+                "name") or subject_info.get("business_name") or ""
         if not business_info.get("service_phone"):
-            business_info["service_phone"] = contact_info.get("mobile") or contact_info.get("mobile_phone") or contact_info.get("service_phone") or ""
+            business_info["service_phone"] = contact_info.get("mobile") or contact_info.get(
+                "mobile_phone") or contact_info.get("service_phone") or ""
 
         # 兜底业务类目
         if not business_info.get("business_category"):
@@ -550,6 +567,15 @@ class WeChatPayClient:
             "business_info": business_info,  # ✅ 添加必需字段
             "settlement_info": {"settle_rule_id": WX_SETTLE_RULE_ID}  # ✅ 添加结算规则（微信必填）
         }
+
+        # ✅ 关键修改：二级子商户进件需要添加 platform_appid（服务商模式）
+        if is_sub_merchant:
+            from core.config import WECHAT_PAY_SP_APPID
+            if WECHAT_PAY_SP_APPID:
+                payload["platform_appid"] = WECHAT_PAY_SP_APPID
+                logger.info(f"【submit_applyment】使用服务商模式进件，platform_appid={WECHAT_PAY_SP_APPID}")
+            else:
+                logger.warning("【submit_applyment】未配置服务商APPID，将作为普通商户进件")
 
         # ✅ 修复：清理空值和敏感数据（微信 API 对空字符串敏感）
         def clean_payload(obj):
@@ -572,9 +598,8 @@ class WeChatPayClient:
         payload = clean_payload(payload)
         body_str = json.dumps(payload, ensure_ascii=False)
 
-        # ✅ 修复：使用公钥ID作为 Wechatpay-Serial
         headers = {
-            'Authorization': self._build_auth_header('POST', url_path, body_str),
+            'Authorization': self._build_auth_header('POST', url_path, body_str, mchid=WECHAT_PAY_SP_MCH_ID),
             'Content-Type': 'application/json',
             'Accept': 'application/json',
             'Wechatpay-Serial': self.pub_key_id or self._get_merchant_serial_no()
@@ -582,6 +607,7 @@ class WeChatPayClient:
 
         # ✅ 添加详细日志
         logger.info(f"【submit_applyment】请求URL: {full_url}")
+        logger.info(f"【submit_applyment】使用服务商商户号: {WECHAT_PAY_SP_MCH_ID}")
         logger.info(f"【submit_applyment】请求体前500字: {body_str[:500]}...")
         logger.info(f"【submit_applyment】Wechatpay-Serial: {headers['Wechatpay-Serial']}")
 

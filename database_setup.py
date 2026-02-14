@@ -552,7 +552,10 @@ class DatabaseManager:
                     user_id BIGINT UNSIGNED NOT NULL COMMENT '商家用户ID，关联 users.id',
                     business_code VARCHAR(124) NOT NULL COMMENT '业务申请编号（唯一，服务商自定义）',
                     applyment_id BIGINT UNSIGNED NULL COMMENT '微信支付申请单号',
-                    sub_mchid VARCHAR(32) NULL COMMENT '特约商户号',
+                    sub_mchid VARCHAR(32) NULL COMMENT '特约商户号（二级子商户号）',
+                    parent_mchid VARCHAR(32) NULL COMMENT '父级服务商商户号（二级商户必填）',
+                    merchant_type ENUM('service_provider', 'sub_merchant') DEFAULT 'sub_merchant' COMMENT '商户类型：服务商/二级子商户',
+                    platform_appid VARCHAR(32) NULL COMMENT '平台APPID（二级商户必填，服务商绑定）',
                     subject_type ENUM(
                         'SUBJECT_TYPE_INDIVIDUAL',
                         'SUBJECT_TYPE_ENTERPRISE',
@@ -589,6 +592,7 @@ class DatabaseManager:
                     INDEX idx_user_id (user_id),
                     INDEX idx_applyment_id (applyment_id),
                     INDEX idx_sub_mchid (sub_mchid),
+                    INDEX idx_parent_mchid (parent_mchid),
                     INDEX idx_applyment_state (applyment_state)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             """,
@@ -836,6 +840,10 @@ class DatabaseManager:
                 'is_timeout_alerted': "is_timeout_alerted TINYINT(1) NOT NULL DEFAULT 0 COMMENT '审核超时提醒是否已发送'",
                 'card_period_begin': "card_period_begin VARCHAR(32) NULL COMMENT '身份证有效期开始（可存长期）'",
                 'card_period_end': "card_period_end VARCHAR(32) NULL COMMENT '身份证有效期结束（可存长期）'",
+                # 新增字段：服务商模式相关
+                'parent_mchid': "parent_mchid VARCHAR(32) NULL COMMENT '父级服务商商户号（二级商户必填）'",
+                'merchant_type': "merchant_type ENUM('service_provider', 'sub_merchant') DEFAULT 'sub_merchant' COMMENT '商户类型：服务商/二级子商户'",
+                'platform_appid': "platform_appid VARCHAR(32) NULL COMMENT '平台APPID（二级商户必填，服务商绑定）'",
             },
             'offline_order': {
                 'coupon_id': "coupon_id INT NULL COMMENT '使用的优惠券ID'",
