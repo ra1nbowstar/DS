@@ -188,8 +188,22 @@ class WechatApplymentService:
                     logger.info(f"用户 {user_id} 创建了进件草稿: {new_id}")
                     return {"applyment_id": new_id, "business_code": business_code}
 
-    async def submit_applyment(self, user_id: int, data: dict) -> dict:
-        """提交进件申请到微信支付"""
+    async def submit_applyment(self, user_id: int, data: dict, parent_mchid: str = None) -> dict:
+        """
+        提交进件申请到微信支付
+        - 作为二级子商户进件（需要平台已配置服务商资质）
+        """
+        # 优先使用传入的参数，否则使用配置
+        from core.config import WECHAT_PAY_SP_MCH_ID, WECHAT_PAY_SP_APPID
+
+        sp_mchid = parent_mchid or WECHAT_PAY_SP_MCH_ID
+
+        if not sp_mchid:
+            raise HTTPException(status_code=400, detail="平台尚未配置微信支付服务商资质，无法为商家进件")
+
+        if not WECHAT_PAY_SP_APPID:
+            raise HTTPException(status_code=400, detail="平台尚未配置服务商APPID，无法为商家进件")
+
         payload_snapshot: dict = {}
         with get_conn() as conn:
             with conn.cursor() as cur:
@@ -261,9 +275,11 @@ class WechatApplymentService:
                     "has_subject_info": bool(applyment.get("subject_info")),
                     "has_bank_account_info": bool(applyment.get("bank_account_info")),
                     "business_info": data.get("business_info") or applyment.get("business_info"),
+                    "parent_mchid": WECHAT_PAY_SP_MCH_ID,  # 记录服务商号
+                    "platform_appid": WECHAT_PAY_SP_APPID,  # 记录服务商APPID
                 }
 
-                # 调用微信支付API提交进件
+                # 调用微信支付API提交进件（强制使用服务商模式）
                 try:
                     # 前端提交的 business_info 透传给微信；如未提供则回退草稿中的字段
                     business_info_raw = data.get("business_info") or applyment.get("business_info") or {}
@@ -279,7 +295,7 @@ class WechatApplymentService:
                         json.loads(incoming_subject_info_raw)
                         if isinstance(incoming_subject_info_raw, str)
                         else incoming_subject_info_raw
-                        or {}
+                             or {}
                     )
                     incoming_identity_info = incoming_subject_info.get("identity_info") or {}
                     if isinstance(incoming_identity_info, str):
@@ -311,7 +327,7 @@ class WechatApplymentService:
                         json.loads(subject_info_raw)
                         if isinstance(subject_info_raw, str)
                         else subject_info_raw
-                        or {}
+                             or {}
                     )
                     identity_info = subject_info.get("identity_info") or {}
                     if isinstance(identity_info, str):
@@ -326,21 +342,21 @@ class WechatApplymentService:
                     if id_card_media.get("id_card_back"):
                         id_card_info["id_card_national"] = id_card_media["id_card_back"]
 
-                    # 回填身份证有效期：优先使用最新提交的数据，其次使用草稿中的存量值
+                    # 回填身份证有效期：优化优先级（已存在的 > 新传入的 > 兜底）
                     if not id_card_info.get("card_period_begin"):
                         candidate_begin = (
-                            incoming_id_card_info.get("card_period_begin")
-                            or incoming_identity_info.get("card_period_begin")
-                            or incoming_subject_info.get("card_period_begin")
+                                id_card_info.get("card_period_begin")  # 已存在的（最高优先级）
+                                or incoming_id_card_info.get("card_period_begin")  # 新传入的
+                                or subject_info.get("card_period_begin")  # 兜底
                         )
                         if candidate_begin:
                             id_card_info["card_period_begin"] = str(candidate_begin)
 
                     if not id_card_info.get("card_period_end"):
                         candidate_end = (
-                            incoming_id_card_info.get("card_period_end")
-                            or incoming_identity_info.get("card_period_end")
-                            or incoming_subject_info.get("card_period_end")
+                                id_card_info.get("card_period_end")  # 已存在的（最高优先级）
+                                or incoming_id_card_info.get("card_period_end")  # 新传入的
+                                or subject_info.get("card_period_end")  # 兜底
                         )
                         if candidate_end:
                             id_card_info["card_period_end"] = str(candidate_end)
@@ -366,8 +382,10 @@ class WechatApplymentService:
                     # 如果仍缺失简称，尝试从主体信息 name/business_name 填充
                     if not business_info_raw.get("merchant_shortname"):
                         subject_info_raw = applyment.get("subject_info")
-                        subject_info = json.loads(subject_info_raw) if isinstance(subject_info_raw, str) else subject_info_raw or {}
-                        fallback_shortname = subject_info.get("merchant_shortname") or subject_info.get("name") or subject_info.get("business_name")
+                        subject_info = json.loads(subject_info_raw) if isinstance(subject_info_raw,
+                                                                                  str) else subject_info_raw or {}
+                        fallback_shortname = subject_info.get("merchant_shortname") or subject_info.get(
+                            "name") or subject_info.get("business_name")
                         if fallback_shortname:
                             business_info_raw["merchant_shortname"] = fallback_shortname
 
@@ -375,13 +393,33 @@ class WechatApplymentService:
                         raise HTTPException(status_code=400, detail="请填写商户简称（merchant_shortname）后再提交")
 
                     applyment["business_info"] = business_info_raw
-                    response = self.pay_client.submit_applyment(applyment)
+
+                    # ✅ 关键修改：显式构建 payload（参考微信文档）
+                    from core.config import WECHAT_PAY_SP_APPID, WECHAT_PAY_SP_MCH_ID, WX_SETTLE_RULE_ID
+
+                    payload = {
+                        "business_code": applyment["business_code"],
+                        "sp_appid": WECHAT_PAY_SP_APPID,  # 必须：服务商APPID
+                        "sp_mchid": WECHAT_PAY_SP_MCH_ID,  # 必须：服务商商户号
+                        "sub_mchid": None,  # 微信会返回
+                        "subject_type": applyment["subject_type"],
+                        "subject_info": subject_info,  # 已处理得很好
+                        "contact_info": contact_info,
+                        "business_info": business_info_raw,  # 必须包含 merchant_shortname
+                        "settlement_info": {  # 新增（强烈建议）
+                            "settlement_id": WX_SETTLE_RULE_ID,  # 从 .env 读取
+                            "settlement_period": "T+1"
+                        }
+                    }
+
+                    # ✅ 强制使用服务商模式（is_sub_merchant=True）
+                    response = self.pay_client.submit_applyment(payload, is_sub_merchant=True)
                     applyment_id = response.get("applyment_id")
 
                     card_period_begin = id_card_info.get("card_period_begin")
                     card_period_end = id_card_info.get("card_period_end")
 
-                    # 更新状态
+                    # 更新状态（添加服务商相关信息）
                     final_update_data = {
                         "applyment_id": applyment_id,
                         "applyment_state": "APPLYMENT_STATE_AUDITING",
@@ -389,7 +427,8 @@ class WechatApplymentService:
                         "submitted_at": datetime.datetime.now(),
                         "card_period_begin": card_period_begin,
                         "card_period_end": card_period_end,
-                        "updated_at": datetime.datetime.now()
+                        "updated_at": datetime.datetime.now(),
+                        "parent_mchid": WECHAT_PAY_SP_MCH_ID,  # 记录服务商号
                     }
                     final_update_sql = build_dynamic_update(cur, "wx_applyment", final_update_data, "id = %s")
                     final_params = list(final_update_data.values()) + [applyment["id"]]
@@ -401,7 +440,7 @@ class WechatApplymentService:
                                            "SYSTEM", response.get("state_msg", ""))
 
                     conn.commit()
-                    logger.info(f"用户 {user_id} 提交进件申请: {applyment_id}")
+                    logger.info(f"用户 {user_id} 提交进件申请: {applyment_id} (服务商: {WECHAT_PAY_SP_MCH_ID})")
 
                     # 推送通知
                     await push_service.send_applyment_status_notification(
@@ -706,7 +745,7 @@ class WechatApplymentService:
                 }
 
                 # 调用微信支付API重新提交
-                response = self.pay_client.submit_applyment(submit_data)
+                response = self.pay_client.submit_applyment(submit_data, is_sub_merchant=True)
                 wx_applyment_id = response.get("applyment_id")
 
                 # ✅ 修复：更新更多字段

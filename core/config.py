@@ -44,6 +44,12 @@ class Settings(BaseSettings):
     # 微信/支付相关
     WECHAT_APP_ID: str = ""
     WECHAT_APP_SECRET: str = ""
+
+    # ==================== 微信支付服务商配置（新增）====================
+    WECHAT_PAY_SP_MCH_ID: str = ""  # 服务商商户号（平台作为服务商时使用）
+    WECHAT_PAY_SP_APPID: str = ""  # 服务商绑定的APPID
+
+    # 原有配置（子商户进件时使用）
     WECHAT_PAY_MCH_ID: str = ""
     WECHAT_PAY_API_V3_KEY: str = ""
     WECHAT_PAY_API_CERT_PATH: str = ""
@@ -277,3 +283,7 @@ QRCODE_EXPIRE_SECONDS: Final[int] = settings.qrcode_expire_seconds
 # 微信支付进件结算规则ID（必填，从服务商后台获取）
 # 默认值为 76011，生产环境请在 .env 文件中配置 WX_SETTLE_RULE_ID
 WX_SETTLE_RULE_ID: str = os.getenv('WX_SETTLE_RULE_ID', '76011')
+
+# ==================== 微信支付服务商配置（模块级别导出）====================
+WECHAT_PAY_SP_MCH_ID: Final[str] = settings.WECHAT_PAY_SP_MCH_ID
+WECHAT_PAY_SP_APPID: Final[str] = settings.WECHAT_PAY_SP_APPID

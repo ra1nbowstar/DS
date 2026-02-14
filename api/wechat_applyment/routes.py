@@ -117,10 +117,11 @@ async def modify_core_info(
     except Exception as e:
         return error_response(message=str(e))
 
+
 @router.post("/resubmit", summary="重新提交被驳回的进件")
 async def resubmit_applyment(
-    applyment_id: int,
-    current_user: dict = Depends(get_current_user)
+        applyment_id: int,
+        current_user: dict = Depends(get_current_user)
 ):
     """根据驳回原因修改后重新提交"""
     try:
@@ -130,9 +131,48 @@ async def resubmit_applyment(
     except Exception as e:
         return error_response(message=str(e))
 
+
+@router.get("/service-provider/status", summary="查询服务商配置状态")
+async def get_service_provider_status(
+        current_user: dict = Depends(get_current_user)
+):
+    """
+    查询平台服务商配置状态
+    - 检查平台是否已配置微信支付服务商资质
+    - 返回服务商基本信息（脱敏）
+    """
+    try:
+        from core.config import WECHAT_PAY_SP_MCH_ID, WECHAT_PAY_SP_APPID
+
+        is_configured = bool(WECHAT_PAY_SP_MCH_ID and WECHAT_PAY_SP_APPID)
+
+        # 脱敏处理
+        sp_mchid_masked = None
+        if WECHAT_PAY_SP_MCH_ID:
+            # 显示前6位和后4位，中间用****代替
+            sp_mchid_masked = f"{WECHAT_PAY_SP_MCH_ID[:6]}****{WECHAT_PAY_SP_MCH_ID[-4:]}" if len(
+                WECHAT_PAY_SP_MCH_ID) > 10 else "****"
+
+        sp_appid_masked = None
+        if WECHAT_PAY_SP_APPID:
+            # 显示前6位和后4位
+            sp_appid_masked = f"{WECHAT_PAY_SP_APPID[:6]}****{WECHAT_PAY_SP_APPID[-4:]}" if len(
+                WECHAT_PAY_SP_APPID) > 10 else "****"
+
+        return success_response(data={
+            "is_configured": is_configured,
+            "sp_mchid": sp_mchid_masked,
+            "sp_appid": sp_appid_masked,
+            "can_apply_sub_merchant": is_configured,
+            "message": "服务商资质已配置，可以为商家进件" if is_configured else "服务商资质未配置，无法为商家进件"
+        })
+    except Exception as e:
+        return error_response(message=str(e))
+
+
 @router.get("/merchant-info", summary="获取商户号信息")
 async def get_merchant_info(
-    current_user: dict = Depends(get_current_user)
+        current_user: dict = Depends(get_current_user)
 ):
     """获取已审核通过的商户号信息"""
     try:
