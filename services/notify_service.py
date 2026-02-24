@@ -176,6 +176,7 @@ async def handle_pay_notify(raw_body: Union[bytes, str]) -> str:
 
 
 async def _handle_offline_pay_notify(order_no: str, wx_total: int, data: dict) -> str:
+    from decimal import Decimal
     """
     处理线下收银台订单支付回调
     """
@@ -386,9 +387,28 @@ async def async_unified_order(req: dict) -> dict:
 
     from core.wx_pay_client import wxpay_client
     out_trade_no = req.get('out_trade_no')
-    total = req.get('amount', {}).get('total')
+
+    # ✅ 关键修复：支持多种金额参数格式
+    # 格式1: 直接传 total_fee (分)
+    # 格式2: 传 amount.total (微信支付V3标准格式)
+    total_fee = req.get('total_fee')
+    if total_fee is None:
+        amount = req.get('amount', {})
+        if isinstance(amount, dict):
+            total_fee = amount.get('total')
+
+    # 确保是整数（分）
+    try:
+        total_fee = int(total_fee) if total_fee else 0
+    except (ValueError, TypeError):
+        raise ValueError(f"无效的金额参数: {total_fee}")
+
+    if total_fee <= 0:
+        raise ValueError(f"支付金额必须大于0: {total_fee}")
+
+    # 提取 openid
     payer = req.get('payer', {})
-    openid = payer.get('openid', '') if isinstance(payer, dict) else ''
+    openid = payer.get('openid', '') if isinstance(payer, dict) else req.get('openid', '')
 
     import anyio
 
@@ -396,9 +416,9 @@ async def async_unified_order(req: dict) -> dict:
         try:
             return wxpay_client.create_jsapi_order(
                 out_trade_no=str(out_trade_no),
-                total_fee=int(total),
+                total_fee=total_fee,  # ✅ 正确传递 total_fee
                 openid=str(openid),
-                description=req.get('description', '')
+                description=req.get('description', '商品支付')
             )
         except Exception as e:
             # 如果底层是 requests.HTTPError，尝试提取 response 内容以便上层返回友好错误
@@ -411,7 +431,8 @@ async def async_unified_order(req: dict) -> dict:
                         body = resp.text
                     except Exception:
                         body = str(resp)
-                    raise RuntimeError(f"WeChat create_jsapi_order failed: status={getattr(resp, 'status_code', '')} body={body}")
+                    raise RuntimeError(
+                        f"WeChat create_jsapi_order failed: status={getattr(resp, 'status_code', '')} body={body}")
             except Exception:
                 pass
             raise
