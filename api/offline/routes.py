@@ -11,6 +11,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from services.offline_service import OfflineService   # 业务逻辑层（稍后实现）
 import xmltodict
 from services.notify_service import handle_pay_notify
+from decimal import Decimal, ROUND_HALF_UP
 
 logger = get_logger(__name__)
 security = HTTPBearer()
@@ -22,7 +23,7 @@ router = APIRouter(
 class CreateOrderReq(BaseModel):
     merchant_id: int
     store_name: str
-    amount: int = Field(..., gt=0)
+    amount: float = Field(..., gt=0, description="订单金额（单位：元），后端会自动转成分")
     product_name: str = ""
     remark: str = ""
 
@@ -51,20 +52,32 @@ class RefundReq(BaseModel):
 @router.post("/dingdan/chuangjian", summary="创建支付单")
 async def create_offline_order(
     req: CreateOrderReq,
-    current_user: dict = Depends(get_current_user)   # 如需登录
+    current_user: dict = Depends(get_current_user)
 ):
     try:
+        # ✅ 把前端传的「元」转为「分」（int）
+        amount_fen: int = int(
+            (Decimal(str(req.amount)) * 100).quantize(Decimal('1'), rounding=ROUND_HALF_UP)
+        )
+
+        if amount_fen <= 0:
+            raise ValueError("订单金额必须大于 0 元")
+
+        # ✅ 关键修复：传入 amount_fen（单位：分）
         result = await OfflineService.create_order(
             merchant_id=req.merchant_id,
             store_name=req.store_name,
-            amount=req.amount,
+            amount=amount_fen,                    # ← 改这里！
             product_name=req.product_name,
             remark=req.remark,
             user_id=current_user["id"]
         )
         return {"code": 0, "message": "下单成功", "data": result}
+
+    except ValueError as e:   # 业务校验错误
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logger.error(f"创建离线订单失败: {e}")
+        logger.error(f"创建离线订单失败: {e}", exc_info=True)
         raise HTTPException(status_code=400, detail=str(e))
 
 
