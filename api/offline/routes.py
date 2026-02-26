@@ -1,5 +1,5 @@
 # api/offline/routes.py  —— 统一风格版
-from fastapi import APIRouter, HTTPException, Query, Depends, Request, Response
+from fastapi import APIRouter, HTTPException, Query, Depends, Request, Response, Body
 from pydantic import BaseModel, Field
 from typing import List, Optional
 from datetime import datetime
@@ -46,6 +46,13 @@ class OrderDetailRsp(BaseModel):
 class RefundReq(BaseModel):
     order_no: str
     refund_amount: Optional[int] = None
+
+
+class UnifiedOrderBody(BaseModel):
+    """统一下单请求体，前端会传 openid、user_id、total_fee（单位：分）"""
+    openid: Optional[str] = None
+    user_id: Optional[int] = None
+    total_fee: Optional[int] = Field(None, description="支付金额单位：分，用于调微信统一下单")
 
 
 # ------------------ 1. 创建支付单 ------------------
@@ -121,25 +128,29 @@ async def get_order_detail(
 async def unified_order(
     order_no: str = Query(..., description="订单号"),
     coupon_id: Optional[int] = Query(None, description="优惠券ID（可选）"),
-    current_user: dict = Depends(get_current_user)  # 当前扫码支付的用户（顾客）
+    total_fee_query: Optional[int] = Query(None, alias="total_fee", description="支付金额单位：分（可选，与 body 二选一）"),
+    current_user: dict = Depends(get_current_user),
+    body: Optional[UnifiedOrderBody] = Body(None),
 ):
     openid = current_user.get("openid")
+    if not openid and body and body.openid:
+        openid = body.openid
     if not openid:
         logger.error(f"用户 {current_user['id']} 未绑定微信 openid")
         raise HTTPException(status_code=400, detail="用户未绑定微信，无法支付")
+    # 从 body 或 query 取 total_fee（单位：分），供后端调微信统一下单使用
+    total_fee = None
+    if body and body.total_fee is not None and body.total_fee > 0:
+        total_fee = body.total_fee
+    elif total_fee_query is not None and total_fee_query > 0:
+        total_fee = total_fee_query
     try:
-        # ====== 关键新增：获取支付用户的微信 openid ======
-        openid = current_user.get("openid")
-        if not openid:
-            logger.error(f"用户 {current_user['id']} 未绑定微信 openid")
-            raise HTTPException(status_code=400, detail="用户未绑定微信，无法支付")
-        
-        # 调用服务层时传递 openid
         result = await OfflineService.unified_order(
             order_no=order_no,
             coupon_id=coupon_id,
             user_id=current_user["id"],
-            openid=openid  # 新增参数
+            openid=openid,
+            total_fee=total_fee,
         )
         
         return {

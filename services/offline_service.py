@@ -131,12 +131,20 @@ class OfflineService:
         current_user_id = str(user_id)
         with get_conn() as conn:
             with conn.cursor(pymysql.cursors.DictCursor) as cur:
+                # 先按「商家查自己订单」查；查不到则按「仅订单号」查（顾客打开支付页）
                 cur.execute(
-                    "SELECT order_no,amount,store_name,product_name,status "
+                    "SELECT order_no, amount, store_name, product_name, status, merchant_id "
                     "FROM offline_order WHERE order_no=%s AND merchant_id=%s",
                     (order_no, current_user_id)
                 )
                 order = cur.fetchone()
+                if not order:
+                    cur.execute(
+                        "SELECT order_no, amount, store_name, product_name, status, merchant_id "
+                        "FROM offline_order WHERE order_no=%s",
+                        (order_no,)
+                    )
+                    order = cur.fetchone()
                 if not order:
                     raise ValueError("订单不存在")
 
@@ -151,23 +159,26 @@ class OfflineService:
     # ---------- 4. 统一下单（核销优惠券 + 调起支付）----------
     @staticmethod
     async def unified_order(
-        order_no: str,
-        coupon_id: Optional[int],
-        user_id: int,
-        openid: str,  # 新增参数：支付用户的微信 openid
+            order_no: str,
+            coupon_id: Optional[int],
+            user_id: int,
+            openid: str,
+            total_fee: Optional[int] = None,
     ) -> dict:
-        current_user_id = str(user_id)
+        """total_fee: 单位分，前端传入；当库内金额为 0 或异常时用作兜底传给微信统一下单。"""
+        current_user_id = str(user_id)  # 当前登录用户ID（顾客）
         with get_conn() as conn:
             with conn.cursor(pymysql.cursors.DictCursor) as cur:
-                # 1. 查询订单原始金额
+                # 1. 查询订单原始金额（仅用订单号，移除商家ID条件）
                 cur.execute(
-                    "SELECT amount, status, merchant_id, user_id FROM offline_order WHERE order_no=%s AND merchant_id=%s",
-                    (order_no, current_user_id)
+                    "SELECT amount, status, merchant_id, user_id FROM offline_order WHERE order_no=%s",
+                    (order_no,)
                 )
                 row = cur.fetchone()
                 if not row or row["status"] != 1:
-                    raise ValueError("订单不可支付")
-                
+                    raise ValueError("订单不存在或不可支付")
+
+
                 original_amount: int = row["amount"]
                 final_amount = original_amount
                 coupon_discount = 0
@@ -200,14 +211,19 @@ class OfflineService:
                 )
                 conn.commit()
 
-        # 4. ====== 关键：使用传入的 openid 调用微信支付 ======
+        # 金额兜底：库内为 0 或异常时用前端传的 total_fee（分），避免微信报「缺少参数 total_fee」
+        amount_for_wx = final_amount if final_amount and final_amount > 0 else (total_fee or 0)
+        if amount_for_wx <= 0:
+            raise ValueError("订单金额异常或未传 total_fee，无法发起支付")
+
+        # 4. ====== 使用 openid 与 amount 调用微信统一下单 ======
         try:
             from services.notify_service import async_unified_order
             
             pay_result = await async_unified_order({
                 'out_trade_no': order_no,
-                'amount': {'total': final_amount},  # 单位：分
-                'payer': {'openid': openid},  # 使用当前登录用户的 openid
+                'amount': {'total': amount_for_wx},  # 单位：分
+                'payer': {'openid': openid},
                 'description': f'线下订单-{row.get("store_name", "")}'
             })
             
@@ -216,12 +232,11 @@ class OfflineService:
                 logger.error(f"微信支付返回异常: {pay_result}")
                 raise ValueError("获取支付参数失败")
             
-            # 5. 生成前端需要的支付参数
+            # 5. 生成前端调起支付用的参数（仅 6 个字段，不包含 total_fee，避免 wx.requestPayment 报错）
             import uuid, time
             timestamp = str(int(time.time()))
             nonce_str = uuid.uuid4().hex
             
-            # 使用微信支付 SDK 生成签名（确保签名正确）
             if wxpay:
                 pay_params = wxpay.get_jsapi_params(prepay_id=prepay_id, timestamp=timestamp, nonce_str=nonce_str)
             else:
@@ -233,9 +248,7 @@ class OfflineService:
                     "signType": "RSA",
                     "paySign": "mock_sign",
                 }
-
-            # ✅ 关键修复：加上 total_fee（前端或封装层需要）
-            pay_params["total_fee"] = str(final_amount)  # 转为字符串
+            # 不向 pay_params 写入 total_fee，前端只拿此对象调 wx.requestPayment
 
             return {
                 "pay_params": pay_params,
