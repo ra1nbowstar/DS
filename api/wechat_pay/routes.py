@@ -197,10 +197,14 @@ async def wechat_pay_notify(request: Request):
     """
     try:
         body = await request.body()
-        # 调试：记录收到的原始请求体及长度（repr 格式，便于发现隐藏字符）
+
+        # 提前定义 headers（关键修复）
+        headers = request.headers
+
+        # 调试日志（现在 headers 已存在，不会报错了）
         try:
             logger.debug(f"收到原始请求体 ({len(body)} bytes): {body!r}")
-            logger.debug(f"请求头 Content-Type: {headers.get('content-type') if 'headers' in locals() else request.headers.get('content-type')}")
+            logger.debug(f"请求头 Content-Type: {headers.get('content-type', '未知')}")
         except Exception:
             logger.debug("无法记录原始请求体（调试日志）")
 

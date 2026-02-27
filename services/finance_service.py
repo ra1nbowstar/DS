@@ -140,9 +140,9 @@ class FinanceService:
 
     def _settle_order_internal(self, cur, order_no: str, user_id: int, order_id: int,
                                points_to_use: Decimal, coupon_discount: Decimal) -> int:
-        """多商品订单结算核心逻辑（最终修复版：按单件商品计算奖励）"""
+        """多商品订单结算核心逻辑（最终干净版：按实付金额分账）"""
         try:
-            # 1. 查询所有订单商品（不再只处理第一件）
+            # 1. 查询所有订单商品
             cur.execute(
                 """SELECT oi.product_id, oi.quantity, oi.unit_price, 
                           p.is_member_product
@@ -172,7 +172,7 @@ class FinanceService:
                 'member_points': Decimal(str(user_row.get('member_points', 0) or 0))
             })()
 
-            # 3. 分类统计商品和计算奖励基数
+            # 3. 计算总金额 + 分类商品
             total_amount = Decimal('0')
             member_items = []
             single_member_price = Decimal('0')
@@ -186,7 +186,7 @@ class FinanceService:
                     if single_member_price == Decimal('0'):
                         single_member_price = Decimal(str(item['unit_price']))
 
-            # 4. 计算优惠抵扣（积分 + 优惠券）
+            # 4. 计算优惠抵扣
             points_discount = points_to_use * POINTS_DISCOUNT_RATE
             total_discount = points_discount + coupon_discount
 
@@ -196,15 +196,15 @@ class FinanceService:
             final_amount = total_amount - total_discount
 
             logger.debug(
-                f"订单金额计算: 商品总额¥{total_amount}, 奖励基数¥{single_member_price}, "
-                f"积分抵扣¥{points_discount}, 优惠券抵扣¥{coupon_discount}, 实付¥{final_amount}"
+                f"订单金额计算: 商品总额¥{total_amount}, 积分抵扣¥{points_discount}, "
+                f"优惠券¥{coupon_discount}, 实付¥{final_amount}"
             )
 
-            # 5. 处理积分抵扣（只处理真实积分）
+            # 5. 处理积分抵扣
             if points_to_use > Decimal('0'):
                 self._apply_points_discount_v2(cur, user_id, user, points_to_use, total_amount, order_id)
 
-            # 6. 更新订单主表（自提订单直接进入待收货）
+            # 6. 更新订单主表
             cur.execute("SELECT delivery_way FROM orders WHERE id=%s", (order_id,))
             order_row = cur.fetchone() or {}
             delivery_way = order_row.get("delivery_way")
@@ -218,20 +218,19 @@ class FinanceService:
                 (PLATFORM_MERCHANT_ID, final_amount, total_amount, total_discount, next_status, order_no)
             )
 
-            # 7. 处理会员商品（整个订单级别一次性处理奖励）
+            # 7. 处理会员商品奖励
             if member_items:
                 total_member_quantity = sum(int(item['quantity']) for item in member_items)
 
                 # 升级会员等级
                 old_level = user.member_level
                 new_level = min(old_level + total_member_quantity, 6)
-
                 cur.execute(
                     "UPDATE users SET member_level = %s, level_changed_at = NOW() WHERE id = %s",
                     (new_level, user_id)
                 )
 
-                # 发放用户积分（基于实付金额比例）
+                # 发放用户积分（基于实付）
                 if final_amount > Decimal('0'):
                     member_total_amount = sum(
                         Decimal(str(item['unit_price'])) * Decimal(str(item['quantity']))
@@ -250,17 +249,15 @@ class FinanceService:
                            VALUES (%s, %s, (SELECT COALESCE(member_points,0) FROM users WHERE id = %s), 'member', %s, %s, NOW())""",
                         (user_id, member_points_earned, user_id, '购买会员商品获得积分', order_id)
                     )
-                    logger.debug(f"用户{user_id}获得积分: +{member_points_earned:.4f}")
 
-                # 发放推荐和团队奖励（传递单件价格和总数量）
+                # 发放推荐和团队奖励
                 if total_member_quantity > 0 and single_member_price > Decimal('0'):
                     self._create_pending_rewards_v2(
                         cur, order_id, user_id, old_level, new_level,
-                        single_member_price,
-                        total_member_quantity
+                        single_member_price, total_member_quantity
                     )
 
-            # 8. 处理普通商品（不发放奖励，只发积分）
+            # 8. 处理普通商品积分（不发奖励）
             normal_items = [item for item in order_items if not item['is_member_product']]
             if normal_items:
                 normal_total_amount = sum(
@@ -269,13 +266,8 @@ class FinanceService:
                 )
 
                 if user.member_level >= 1 and final_amount > Decimal('0'):
-                    # 【修改】新的积分计算逻辑：(优惠券抵扣金额 + 实付金额) × 普通商品金额 / 订单总金额
                     points_ratio = normal_total_amount / total_amount if total_amount > 0 else Decimal('0')
-
-                    # 计算基数：优惠券抵扣 + 实付金额（即订单总额减去积分抵扣部分）
                     calculation_base = coupon_discount + final_amount
-
-                    # 确保基数不为负数
                     if calculation_base < Decimal('0'):
                         calculation_base = Decimal('0')
 
@@ -291,50 +283,72 @@ class FinanceService:
                            VALUES (%s, %s, (SELECT COALESCE(member_points,0) FROM users WHERE id = %s), 'member', %s, %s, NOW())""",
                         (user_id, normal_points_earned, user_id, '购买普通商品获得积分', order_id)
                     )
-                    logger.debug(f"用户{user_id}获得积分: +{normal_points_earned:.4f}")
-            # 9. 记录完整用户支付链路（100% 收入 → 80% 商家 + 20% 各池）
+
+            # ==================== 9. 资金分账（始终执行，按实付金额） ====================
             allocs = self.get_pool_allocations()
 
-            # 【修改】资金分配计算基数：实付金额 + 优惠券抵扣金额
-            distribution_base = final_amount + coupon_discount
+            distribution_base = final_amount
             if distribution_base < Decimal('0'):
                 distribution_base = Decimal('0')
 
-            platform_revenue = distribution_base  # ① 先按新的基数记收入
+            logger.debug(
+                f"[分账基数] 订单{order_no} 使用实付金额作为基数: ¥{distribution_base:.2f} "
+                f"（原价¥{total_amount:.2f}，积分抵扣¥{points_discount:.2f}，优惠券¥{coupon_discount:.2f}）"
+            )
+
+            # 平台收入池记入 100% 实付现金
             self._add_pool_balance(
-                cur,
-                'platform_revenue_pool',
-                platform_revenue,
-                f"订单分账: {order_no} 分配基数¥{distribution_base:.2f}(实付¥{final_amount:.2f}+优惠券¥{coupon_discount:.2f})",
+                cur, 'platform_revenue_pool', distribution_base,
+                f"订单分账: {order_no} 实付现金¥{distribution_base:.2f}（原价¥{total_amount:.2f}）",
                 user_id
             )
 
-            # ② 再记 20% 支出（分配到各子池）
+            # 各子池统一分配（从平台收入池扣减）
             for atype, ratio in allocs.items():
                 if atype == 'merchant_balance':
                     continue
-                # 【修改】使用新的分配基数计算各子池金额
-                alloc_amount = distribution_base * ratio
+                alloc_amount = (distribution_base * ratio).quantize(Decimal('0.0001'))
                 self._add_pool_balance(
-                    cur,
-                    'platform_revenue_pool',
-                    -alloc_amount,
-                    f"订单分账: {order_no} 分配到{atype}池¥{alloc_amount:.2f}",
+                    cur, 'platform_revenue_pool', -alloc_amount,
+                    f"订单分账: {order_no} → {atype} ({ratio * 100:.0f}%)",
                     user_id
                 )
-                # 各子池收入
                 self._add_pool_balance(
-                    cur,
-                    atype,
-                    alloc_amount,
-                    f"订单分账: {order_no} {atype}池收入¥{alloc_amount:.2f}",
+                    cur, atype, alloc_amount,
+                    f"订单#{order_no} {atype.replace('_', ' ')}+{int(ratio * 100)}%",
                     user_id
                 )
 
-            # 记录流水
+            # ========== 新增：公司积分池独立增加（基于实付金额的20%） ==========
+            company_points_amount = (distribution_base * Decimal('0.20')).quantize(Decimal('0.0001'))
+            cur.execute(
+                "UPDATE finance_accounts SET balance = balance + %s WHERE account_type = 'company_points'",
+                (company_points_amount,)
+            )
+            # 记录公司积分池流水
+            cur.execute("SELECT balance FROM finance_accounts WHERE account_type = 'company_points'")
+            cp_new_balance = Decimal(str(cur.fetchone()['balance'] or 0))
+            cur.execute(
+                """INSERT INTO account_flow (account_type, related_user, change_amount, balance_after, 
+                   flow_type, remark, created_at)
+                   VALUES (%s, %s, %s, %s, %s, %s, NOW())""",
+                ('company_points', PLATFORM_MERCHANT_ID, company_points_amount, cp_new_balance, 'income',
+                 f"订单#{order_no} 公司积分池+20% ¥{company_points_amount:.4f}")
+            )
+            # 可选：在 points_log 中也记录公司积分池变动（便于积分报表）
+            try:
+                cur.execute(
+                    "INSERT INTO points_log (user_id, change_amount, balance_after, type, reason, related_order, created_at) VALUES (%s, %s, %s, 'company', %s, %s, NOW())",
+                    (PLATFORM_MERCHANT_ID, company_points_amount, cp_new_balance,
+                     f"订单#{order_no} 公司积分池增加", order_id)
+                )
+            except Exception as e:
+                logger.debug(f"写入 points_log（公司积分池）失败: {e}")
+            # ======================================================================
+
+            # 记录平台收入池流水
             cur.execute("SELECT balance FROM finance_accounts WHERE account_type = 'platform_revenue_pool'")
             new_balance = Decimal(str(cur.fetchone()['balance'] or 0))
-
             cur.execute(
                 """INSERT INTO account_flow (account_type, related_user, change_amount, balance_after, 
                    flow_type, remark, created_at)
@@ -342,47 +356,14 @@ class FinanceService:
                 (
                     'platform_revenue_pool',
                     PLATFORM_MERCHANT_ID,
-                    platform_revenue,
+                    distribution_base,
                     new_balance,
                     'income',
-                    f"订单分账: {order_no} 平台收入¥{platform_revenue:.2f}"
+                    f"订单分账: {order_no} 平台收入¥{distribution_base:.2f}"
                 )
             )
 
-            # 公司积分池增加：基于订单总额扣除积分抵扣后的基数的20%
-            try:
-                company_base = total_amount - points_discount
-                if company_base < Decimal('0'):
-                    company_base = Decimal('0')
-                company_points = (company_base * Decimal('0.20')).quantize(Decimal('0.0001'))
-
-                cur.execute(
-                    "UPDATE finance_accounts SET balance = balance + %s WHERE account_type = 'company_points'",
-                    (company_points,)
-                )
-                cur.execute("SELECT balance FROM finance_accounts WHERE account_type = %s", ('company_points',))
-                cp_row = cur.fetchone()
-                cp_new_balance = Decimal(str(cp_row['balance'] or 0))
-
-                cur.execute(
-                    """INSERT INTO account_flow (account_type, related_user, change_amount, balance_after, 
-                       flow_type, remark, created_at)
-                       VALUES (%s, %s, %s, %s, %s, %s, NOW())""",
-                    ('company_points', PLATFORM_MERCHANT_ID, company_points, cp_new_balance, 'income', f"订单#{order_id} 公司积分池+20% ¥{company_points:.4f}")
-                )
-                logger.debug(f"公司积分池增加: ¥{company_points:.4f}（订单#{order_id}）")
-                # 在积分流水中记录公司积分池的变动（便于积分报表追踪）
-                try:
-                    cur.execute(
-                        "INSERT INTO points_log (user_id, change_amount, balance_after, type, reason, related_order, created_at) VALUES (%s, %s, %s, %s, %s, %s, NOW())",
-                        (PLATFORM_MERCHANT_ID, company_points, cp_new_balance, 'company', f"订单#{order_id} 公司积分池增加", order_id)
-                    )
-                except Exception as e:
-                    logger.debug(f"写入 points_log（公司积分池）失败: {e}")
-            except Exception as e:
-                logger.error(f"更新公司积分池失败: {e}")
-
-            logger.debug(f"订单结算成功: ID={order_id}, 奖励基数¥{single_member_price}")
+            logger.debug(f"订单结算成功: {order_no}，实付分账基数¥{distribution_base:.2f}")
             return order_id
 
         except Exception as e:

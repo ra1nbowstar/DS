@@ -330,13 +330,6 @@ async def _handle_online_pay_notify(order_no: str, wx_total: int, data: dict) ->
                 if wx_total != db_total:
                     raise ValueError(f"金额不一致 微信{wx_total}≠系统{db_total}")
 
-                # 4. 真正扣积分
-                if order["pending_points"]:
-                    cur.execute(
-                        "UPDATE users SET member_points=member_points-%s WHERE id=%s",
-                        (order["pending_points"], order["user_id"])
-                    )
-
                 # 记录优惠券和积分抵扣金额到订单表（关键修复）
                 cur.execute("""
                     UPDATE orders 
