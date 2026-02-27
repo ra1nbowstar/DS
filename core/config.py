@@ -147,7 +147,7 @@ ALLOCATIONS: Final[dict[AllocationKey, Decimal]] = {
 }
 
 # ==================== 其他业务常量 ====================
-MAX_POINTS_VALUE: Final[Decimal] = Decimal('0.02')
+MAX_POINTS_VALUE: Final[Decimal] = Decimal('0.0005')
 TAX_RATE: Final[Decimal] = Decimal('0.06')
 POINTS_DISCOUNT_RATE: Final[Decimal] = Decimal('1.0')
 COUPON_VALID_DAYS: Final[int] = 30

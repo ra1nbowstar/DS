@@ -267,7 +267,7 @@ class FinanceService:
 
                 if user.member_level >= 1 and final_amount > Decimal('0'):
                     points_ratio = normal_total_amount / total_amount if total_amount > 0 else Decimal('0')
-                    calculation_base = coupon_discount + final_amount
+                    calculation_base = final_amount  # ← 仅实付现金
                     if calculation_base < Decimal('0'):
                         calculation_base = Decimal('0')
 
@@ -6540,7 +6540,62 @@ class FinanceService:
                     "remark": "整合用户积分(member_points)、商家积分(merchant_points)和公司积分池(company_points)的完整流水明细，grand_total.current_balance_total为三种积分余额总和，current_balance_total为三种积分余额总和，current_balance_total为三种积分余额总和，current_balance_total为三种积分余额总和"
                 }
 
-# ==================== 微信支付商户账户提现到银行卡（自提）功能 ====================
+# ---------- 新增：公益基金转出 ----------
+    def transfer_from_public_welfare(
+        self,
+        amount: Decimal,
+        target_account: str,
+        remark: str,
+        operator_id: int = 0
+    ) -> bool:
+        """
+        从公益基金账户转出资金（管理员操作）
+        :param amount: 转出金额（元）
+        :param target_account: 目标账户描述（如银行卡号、机构名）
+        :param remark: 转出备注（用途）
+        :param operator_id: 操作人用户ID（管理员）
+        :return: 是否成功
+        """
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                # 1. 获取当前余额并加锁（防止并发）
+                cur.execute(
+                    "SELECT balance FROM finance_accounts WHERE account_type = 'public_welfare' FOR UPDATE"
+                )
+                row = cur.fetchone()
+                if not row:
+                    raise FinanceException("公益基金账户不存在")
+                current_balance = Decimal(str(row['balance']))
+
+                if current_balance < amount:
+                    raise InsufficientBalanceException(
+                        "public_welfare",
+                        amount,
+                        current_balance,
+                        "公益基金余额不足"
+                    )
+
+                # 2. 扣减余额
+                new_balance = current_balance - amount
+                cur.execute(
+                    "UPDATE finance_accounts SET balance = %s WHERE account_type = 'public_welfare'",
+                    (new_balance,)
+                )
+
+                # 3. 记录资金流水（支出）
+                cur.execute(
+                    """INSERT INTO account_flow 
+                       (account_type, related_user, change_amount, balance_after, flow_type, remark, created_at)
+                       VALUES (%s, %s, %s, %s, %s, %s, NOW())""",
+                    ('public_welfare', operator_id, -amount, new_balance, 'expense',
+                     f"公益基金转出至{target_account}，用途：{remark}")
+                )
+
+                conn.commit()
+                logger.info(f"公益基金转出成功: 金额={amount}, 目标={target_account}, 操作人={operator_id}")
+                return True
+
+    # ==================== 微信支付商户账户提现到银行卡（自提）功能 ====================
     def merchant_withdraw_to_bankcard(
             self,
             out_request_no: str,

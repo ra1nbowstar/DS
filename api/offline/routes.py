@@ -79,7 +79,7 @@ async def check_wechat_pay_config(
 
     # 判断整体状态
     is_fully_configured = (
-            not settings.WX_MOCK_MODE and
+            not settings.wx_mock_mode_bool and  # ✅ 使用布尔属性
             config_status["app_id_configured"] and
             config_status["mch_id_configured"] and
             config_status["api_v3_key_configured"] and
@@ -89,7 +89,7 @@ async def check_wechat_pay_config(
 
     config_status["is_fully_configured"] = is_fully_configured
 
-    if settings.WX_MOCK_MODE:
+    if settings.wx_mock_mode_bool:   # ✅ 使用布尔属性
         config_status["warning"] = "当前处于 Mock 模式，支付将使用模拟数据，不会真正扣款"
     elif not is_fully_configured:
         config_status["warning"] = "微信支付配置不完整，可能导致支付失败"
@@ -218,7 +218,7 @@ async def unified_order(
             raise HTTPException(status_code=500, detail="支付参数生成失败，缺少签名")
 
         # 如果是 Mock 模式，添加警告信息
-        if settings.WX_MOCK_MODE:
+        if settings.wx_mock_mode_bool:   # ✅ 使用布尔属性
             result["warning"] = "当前处于 Mock 模式，支付不会真正扣款"
             result["is_mock"] = True
         else:

@@ -24,7 +24,7 @@ settings: Settings
 logger = get_logger(__name__)
 
 # ----------- 全局 wxpay 实例 ----------
-if not settings.WX_MOCK_MODE:
+if not settings.wx_mock_mode_bool:   # ✅ 修改为布尔属性
     from wechatpayv3 import WeChatPay, WeChatPayType
 
     # 加载商户私钥（字符串）
@@ -52,7 +52,7 @@ else:
 
 # 2. 给用户微信“零钱到账”通知
 async def _transfer_to_user(openid: str, amount: Decimal, desc: str) -> str:
-    if settings.WX_MOCK_MODE:
+    if settings.wx_mock_mode_bool:   # ✅ 使用布尔属性
         logger.info(f"[MOCK] 转账 {amount:.2f} 元至 {openid}（描述：{desc}）")
         return "mock_batch_id"
     amount_int = int(amount * 100)
@@ -86,7 +86,7 @@ async def _transfer_to_user(openid: str, amount: Decimal, desc: str) -> str:
 
 # 3. 给商户微信下发「模板消息」
 async def _notify_template(openid: str, order_no: str, amount: Decimal):
-    if settings.WX_MOCK_MODE:
+    if settings.wx_mock_mode_bool:   # ✅ 使用布尔属性
         logger.info(f"[MOCK] 模板消息：openid={openid} 订单={order_no} 金额={amount:.2f}")
         return
     """
@@ -374,7 +374,7 @@ async def async_unified_order(req: dict) -> dict:
     异步包装：在后台线程调用 core.wx_pay_client.wxpay_client.create_jsapi_order
     目的：兼容原来期望 ns.wxpay.async_unified_order 的调用方式
     """
-    if settings.WX_MOCK_MODE:
+    if settings.wx_mock_mode_bool:   # ✅ 修改为布尔属性
         import uuid, time
         return {"prepay_id": f"MOCK_PREPAY_{int(time.time())}_{uuid.uuid4().hex[:8]}"}
 

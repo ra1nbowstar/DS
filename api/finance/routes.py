@@ -11,7 +11,7 @@ from core.logging import get_logger
 from core.table_access import build_dynamic_select
 from database_setup import DatabaseManager
 from services.finance_service import FinanceService
-from core.exceptions import FinanceException, OrderException
+from core.exceptions import FinanceException, OrderException, InsufficientBalanceException
 from core.config import PLATFORM_MERCHANT_ID, MEMBER_PRODUCT_PRICE, MAX_TEAM_LAYER
 from models.schemas.finance import (
     ResponseModel, UserCreateRequest, ProductCreateRequest, OrderRequest,
@@ -19,14 +19,22 @@ from models.schemas.finance import (
     CouponUseRequest, RefundRequest,
     MerchantWithdrawToBankcardRequest, MerchantWithdrawQueryRequest
 )
-from typing import List
-from pydantic import BaseModel
+from core.auth import get_current_user   # 如果已存在
+from typing import List, Optional
+from pydantic import BaseModel, Field
 
 logger = get_logger(__name__)
 
 # 创建财务系统的路由
 router = APIRouter()
 
+# 定义管理员ID列表（可根据实际修改）
+ADMIN_IDS = [1]  # 假设ID为1的用户是管理员
+
+async def get_current_admin(current_user: Dict = Depends(get_current_user)):
+    if current_user.get('id') not in ADMIN_IDS:
+        raise HTTPException(status_code=403, detail="需要管理员权限")
+    return current_user
 
 def get_finance_service() -> FinanceService:
     """获取 FinanceService 实例（使用统一的 pymysql 连接）"""
@@ -77,8 +85,8 @@ async def get_current_points_value(
         raise HTTPException(status_code=500, detail=str(e))
 @router.post("/api/subsidy/points-value/adjust", response_model=ResponseModel, summary="调整积分值")
 async def adjust_subsidy_points_value(
-        points_value: Optional[float] = Query(None, ge=0, le=0.02,
-                                              description="积分值（0-0.02），不传或传null取消手动调整"),
+        points_value: Optional[float] = Query(None, ge=0, le=0.0005,
+                                              description="积分值（0-0.0005），不传或传null取消手动调整"),
         auto_clear: bool = Query(True, description="是否在发放一次后自动清除，默认为true"),
         service: FinanceService = Depends(get_finance_service)
 ):
@@ -347,6 +355,49 @@ async def get_public_welfare_report(
             data={"summary": report_data['summary'], "details": details}
         )
     except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+# ---------- 新增：公益基金转出 ----------
+class PublicWelfareTransferRequest(BaseModel):
+    amount: float = Field(..., gt=0, description="转出金额（元）")
+    target_account: str = Field(..., min_length=1, max_length=200, description="目标账户信息")
+    remark: str = Field(..., min_length=1, max_length=500, description="转出用途")
+
+@router.post("/api/public-welfare/transfer", response_model=ResponseModel, summary="公益基金转出（管理员）")
+async def transfer_public_welfare(
+    request: PublicWelfareTransferRequest,
+    admin: Dict = Depends(get_current_admin),
+    service: FinanceService = Depends(get_finance_service)
+):
+    """
+    管理员操作：将公益基金账户的资金转出到指定账户（如银行卡、其他公益机构）。
+    记录详细流水，需确保余额充足。
+    """
+    try:
+        amount = Decimal(str(request.amount))
+        success = service.transfer_from_public_welfare(
+            amount=amount,
+            target_account=request.target_account,
+            remark=request.remark,
+            operator_id=admin['id']
+        )
+        if success:
+            return ResponseModel(
+                success=True,
+                message=f"公益基金转出成功，金额 ¥{request.amount:.2f}",
+                data={
+                    "amount": request.amount,
+                    "target_account": request.target_account,
+                    "remark": request.remark
+                }
+            )
+        else:
+            raise HTTPException(status_code=500, detail="转出失败")
+    except InsufficientBalanceException as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except FinanceException as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"公益基金转出异常: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 

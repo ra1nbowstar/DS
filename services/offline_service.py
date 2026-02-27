@@ -22,7 +22,7 @@ from services.wechat_api import get_wxacode
 logger = get_logger(__name__)
 
 # -------------- 运行时 wxpay 初始化 --------------
-if not settings.WX_MOCK_MODE:
+if not settings.wx_mock_mode_bool:   # ✅ 修改为布尔属性
     from wechatpayv3 import WeChatPay, WeChatPayType
     priv_path = Path(settings.WECHAT_PAY_API_KEY_PATH)
     if not priv_path.exists():
@@ -169,7 +169,7 @@ class OfflineService:
         current_user_id = str(user_id)  # 当前登录用户ID（顾客）
 
         # ========== 新增：检查微信支付配置 ==========
-        if settings.WX_MOCK_MODE:
+        if settings.wx_mock_mode_bool:   # ✅ 使用布尔属性
             logger.warning("⚠️ 当前处于微信支付 Mock 模式，将返回模拟支付参数")
             logger.warning("⚠️ 如需真实支付，请设置 WX_MOCK_MODE=false 并配置正确的商户信息")
 
@@ -227,7 +227,7 @@ class OfflineService:
             # ========== 修改：优先使用核心微信支付客户端 ==========
             from core.wx_pay_client import wxpay_client
 
-            if settings.WX_MOCK_MODE:
+            if settings.wx_mock_mode_bool:   # ✅ 使用布尔属性
                 # Mock 模式：生成模拟支付参数
                 logger.info(f"[MOCK] 模拟统一下单: order_no={order_no}, amount={amount_for_wx}")
                 prepay_id = f"MOCK_PREPAY_{int(datetime.now().timestamp())}_{user_id}"
