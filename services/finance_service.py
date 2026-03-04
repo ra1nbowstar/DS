@@ -304,7 +304,7 @@ class FinanceService:
                     for item in normal_items
                 )
 
-                if user.member_level >= 1 and final_amount > Decimal('0'):
+                if final_amount > Decimal('0'):  # >>> 修改后：移除 member_level >= 1 限制，所有用户都有积分
                     points_ratio = normal_total_amount / total_amount if total_amount > 0 else Decimal('0')
                     calculation_base = final_amount
                     if calculation_base < Decimal('0'):

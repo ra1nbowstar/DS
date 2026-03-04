@@ -566,6 +566,26 @@ class OrderManager:
                     if is_zero_order:
                         from services.finance_service import FinanceService
                         fs = FinanceService()
+
+                        # ========== 新增：零元订单立即核销优惠券 ==========
+                        if coupon_id:
+                            # 再次锁定优惠券行，防止并发
+                            cur.execute(
+                                "SELECT status FROM coupons WHERE id = %s FOR UPDATE",
+                                (coupon_id,)
+                            )
+                            coupon_row = cur.fetchone()
+                            if not coupon_row:
+                                raise HTTPException(status_code=400, detail="优惠券不存在")
+                            if coupon_row['status'] != 'unused':
+                                raise HTTPException(status_code=400, detail="优惠券不可用")
+                            cur.execute(
+                                "UPDATE coupons SET status='used', used_at=NOW() WHERE id = %s",
+                                (coupon_id,)
+                            )
+                            logger.info(f"零元订单核销优惠券: coupon_id={coupon_id}")
+                        # =================================================
+
                         fs.settle_order(
                             order_no=order_number,
                             user_id=user_id,
