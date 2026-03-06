@@ -7,7 +7,7 @@ if TYPE_CHECKING:
     from fastapi import FastAPI
 
 from .cart import router as cart_router
-from .order import router as order_router, start_order_expire_task, start_wechat_status_sync_task  # 新增导入
+from .order import router as order_router, start_order_expire_task
 from .refund import router as refund_router
 from .merchant import router as merchant_router
 from .logistics import register_logistics_routes
@@ -26,7 +26,6 @@ def register_routes(app: "FastAPI"):
     # 注意：这些函数内部使用了 daemon thread，多次调用不会重复启动
     try:
         start_order_expire_task()
-        start_wechat_status_sync_task()
     except Exception as e:
         # 如果已经启动会抛出异常，忽略
         import logging
