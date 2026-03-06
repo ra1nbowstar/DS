@@ -8,6 +8,11 @@ import logging
 from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
+# Lower scheduler log level to reduce noise in shared logs
+logger.setLevel(logging.WARNING)
+# Suppress APScheduler info/debug noise
+logging.getLogger("apscheduler").setLevel(logging.WARNING)
+logging.getLogger("apscheduler.scheduler").setLevel(logging.WARNING)
 
 
 class TaskScheduler:
