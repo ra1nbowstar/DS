@@ -151,7 +151,8 @@ class FinanceService:
                 current_balance,
                 message=f"资金池 {account_type} 余额不足，当前: {current_balance:.4f}，需要扣减: {amount_to_deduct:.4f}"
             )
-       # ==================== 关键修改：支持外部连接复用，分离优惠券逻辑 ====================
+
+    # ==================== 关键修改：支持外部连接复用，分离优惠券逻辑 ====================
     def settle_order(self, order_no: str, user_id: int, order_id: int,
                      points_to_use: Decimal = Decimal('0'),
                      coupon_discount: Decimal = Decimal('0'),
@@ -191,6 +192,22 @@ class FinanceService:
 
             if not order_items:
                 raise OrderException(f"订单无商品明细: {order_no}")
+
+            # 1.1 如果存在订单表中的 pending_coupon_id，则提前锁定并核销优惠券
+            cur.execute("SELECT pending_coupon_id FROM orders WHERE order_number=%s FOR UPDATE", (order_no,))
+            order_info = cur.fetchone() or {}
+            coupon_id = order_info.get('pending_coupon_id')
+            if coupon_id:
+                cur.execute("SELECT status FROM coupons WHERE id=%s FOR UPDATE", (coupon_id,))
+                coupon_row = cur.fetchone()
+                if not coupon_row:
+                    raise OrderException(f"优惠券不存在: {coupon_id}")
+                if coupon_row.get('status') != 'unused':
+                    raise OrderException(f"优惠券不可用或已使用: {coupon_id}")
+                cur.execute(
+                    "UPDATE coupons SET status='used', used_at=NOW() WHERE id=%s AND status='unused'",
+                    (coupon_id,)
+                )
 
             # 2. 查询用户信息
             select_sql = build_dynamic_select(
@@ -236,7 +253,10 @@ class FinanceService:
                 f"优惠券¥{coupon_discount}, 实付¥{final_amount}"
             )
 
-            # ==================== 此处已删除错误的零元订单处理代码块 ====================
+            # ==================== 新增：零元订单处理逻辑 ====================
+            # 如果实付金额为0，记录日志（后续流程会正常继续执行订单状态更新）
+            if final_amount <= Decimal('0'):
+                logger.info(f"检测到零元订单: {order_no} ，系统将自动完成结算流程")
 
             # 处理积分抵扣（原代码）
             if points_to_use > Decimal('0'):
@@ -246,14 +266,19 @@ class FinanceService:
             cur.execute("SELECT delivery_way FROM orders WHERE id=%s", (order_id,))
             order_row = cur.fetchone() or {}
             delivery_way = order_row.get("delivery_way")
-            next_status = "pending_recv" if delivery_way == "pickup" else "pending_ship"
+
+            # 对于零元订单，直接设为待收货状态，无需发货
+            if final_amount <= Decimal('0'):
+                next_status = "pending_recv"
+            else:
+                next_status = "pending_recv" if delivery_way == "pickup" else "pending_ship"
 
             cur.execute(
                 """UPDATE orders SET 
-                   merchant_id=%s, total_amount=%s, original_amount=%s,
+                   total_amount=%s, original_amount=%s,
                    points_discount=%s, status=%s, updated_at=NOW()
                    WHERE order_number=%s""",
-                (PLATFORM_MERCHANT_ID, final_amount, total_amount, total_discount, next_status, order_no)
+                (final_amount, total_amount, total_discount, next_status, order_no)
             )
 
             # 7. 处理会员商品奖励
@@ -372,7 +397,7 @@ class FinanceService:
             for atype, ratio in allocs.items():
                 if atype == 'merchant_balance':
                     continue
-                alloc_amount = (distribution_base * ratio).quantize(Decimal('0.0001'))
+                alloc_amount = (distribution_base * ratio).quantize(Decimal('0.000001'))
                 self._add_pool_balance(
                     cur, 'platform_revenue_pool', -alloc_amount,
                     f"订单分账: {order_no} → {atype} ({ratio * 100:.0f}%)",
@@ -380,7 +405,7 @@ class FinanceService:
                 )
                 if atype == 'fund_pool' and has_referrer and normal_paid > 0:
                     # 计算应给推荐人的金额（基于普通商品部分）
-                    referral_amount = (normal_paid * ratio).quantize(Decimal('0.0001'))
+                    referral_amount = (normal_paid * ratio).quantize(Decimal('0.000001'))
                     # 发放给推荐人点数
                     self._grant_referral_points(cur, referrer_id, referral_amount, order_no)
                     # 剩余部分进入事业发展基金
@@ -399,7 +424,7 @@ class FinanceService:
                     )
 
             # ========== 新增：公司积分池独立增加（基于实付金额的20%） ==========
-            company_points_amount = (distribution_base * Decimal('0.20')).quantize(Decimal('0.0001'))
+            company_points_amount = (distribution_base * Decimal('0.20')).quantize(Decimal('0.000001'))
             cur.execute(
                 "UPDATE finance_accounts SET balance = balance + %s WHERE account_type = 'company_points'",
                 (company_points_amount,)
@@ -670,7 +695,8 @@ class FinanceService:
                     """INSERT INTO account_flow (account_type, related_user, change_amount, balance_after, 
                        flow_type, remark, created_at)
                        VALUES (%s, %s, %s, %s, %s, %s, NOW())""",
-                    (atype, PLATFORM_MERCHANT_ID, alloc_amount, new_balance, 'income', f"会员订单#{order_id} {atype}池¥{alloc_amount:.2f}")
+                    (atype, PLATFORM_MERCHANT_ID, alloc_amount, new_balance, 'income',
+                     f"会员订单#{order_id} {atype}池¥{alloc_amount:.2f}")
                 )
                 logger.debug(f"池子 {atype} 增加: {alloc_amount:.4f}（已写入流水）")
             except Exception as e:
@@ -992,7 +1018,7 @@ class FinanceService:
         # 移除 try...except 块，让 FinanceException 直接向上抛出
 
     def get_rewards_by_status(self, status: str = 'approved', reward_type: Optional[str] = None, limit: int = 50) -> \
-    List[Dict[str, Any]]:
+            List[Dict[str, Any]]:
         """
         查询已自动发放的奖励记录（从 account_flow 查询）
         status 参数现在仅用于过滤：'approved'=已发放, 'all'=全部
@@ -1672,7 +1698,8 @@ class FinanceService:
                     raise FinanceException("提现记录不存在或已处理")
 
                 # 读取记录以便后续处理（短查询）
-                cur.execute(f"SELECT {build_select_list(select_fields)} FROM withdrawals WHERE id = %s", (withdrawal_id,))
+                cur.execute(f"SELECT {build_select_list(select_fields)} FROM withdrawals WHERE id = %s",
+                            (withdrawal_id,))
                 withdraw = cur.fetchone()
 
                 if approve:
@@ -1752,7 +1779,8 @@ class FinanceService:
         # 使用同一个事务读写，避免跨连接导致未提交余额不可见
         cur.execute("SELECT balance FROM finance_accounts WHERE account_type = %s FOR UPDATE", (account_type,))
         row = cur.fetchone()
-        current_balance = Decimal(str(row['balance'] if row and row['balance'] is not None else 0)) if row else Decimal('0')
+        current_balance = Decimal(str(row['balance'] if row and row['balance'] is not None else 0)) if row else Decimal(
+            '0')
 
         # 若账户不存在则先创建，初始余额按当前余额（0）+amount
         if not row:
@@ -1894,7 +1922,9 @@ class FinanceService:
                 try:
                     placeholders, params_dict = build_in_placeholders(account_keys)
                     params_tuple = tuple(params_dict[f"id{i}"] for i in range(len(account_keys)))
-                    cur.execute(f"SELECT account_type, config_params FROM finance_accounts WHERE account_type IN ({placeholders})", params_tuple)
+                    cur.execute(
+                        f"SELECT account_type, config_params FROM finance_accounts WHERE account_type IN ({placeholders})",
+                        params_tuple)
                     rows = cur.fetchall()
                 except Exception as e:
                     logger.error(f"读取 finance_accounts 行失败: {e}")
@@ -1987,7 +2017,8 @@ class FinanceService:
             with conn.cursor() as cur:
                 for atype, dec in normalized.items():
                     try:
-                        cur.execute("SELECT id, config_params FROM finance_accounts WHERE account_type=%s LIMIT 1", (atype,))
+                        cur.execute("SELECT id, config_params FROM finance_accounts WHERE account_type=%s LIMIT 1",
+                                    (atype,))
                         row = cur.fetchone()
                         new_cp = None
                         if row:
@@ -2295,8 +2326,9 @@ class FinanceService:
                     "created_at": c['created_at'].strftime("%Y-%m-%d %H:%M:%S")
                 } for c in coupons]
             # ----------------------------------
-                # 供线下模块调用的快捷接口
+            # 供线下模块调用的快捷接口
             # ----------------------------------
+
     def list_available(self, user_id: int, amount: int = 0) -> List[Dict[str, Any]]:
         """
         查询用户当前可用的优惠券列表（线下收银台用）
@@ -2338,7 +2370,8 @@ class FinanceService:
                     is_numeric_type = 'DECIMAL' in field_type or 'INT' in field_type or 'FLOAT' in field_type or 'DOUBLE' in field_type
 
                     if is_asset_field and is_numeric_type:
-                        select_fields.append(f"COALESCE({_quote_identifier(field_name)}, 0) AS {_quote_identifier(field_name)}")
+                        select_fields.append(
+                            f"COALESCE({_quote_identifier(field_name)}, 0) AS {_quote_identifier(field_name)}")
                     else:
                         select_fields.append(_quote_identifier(field_name))
 
@@ -2918,7 +2951,8 @@ class FinanceService:
                     is_numeric_type = 'DECIMAL' in field_type or 'INT' in field_type or 'FLOAT' in field_type or 'DOUBLE' in field_type
 
                     if is_asset_field and is_numeric_type:
-                        select_fields.append(f"COALESCE({_quote_identifier('wsr.' + field_name)}, 0) AS {_quote_identifier(field_name)}")
+                        select_fields.append(
+                            f"COALESCE({_quote_identifier('wsr.' + field_name)}, 0) AS {_quote_identifier(field_name)}")
                         asset_fields.append(field_name)
                     else:
                         select_fields.append(_quote_identifier('wsr.' + field_name))
@@ -3401,6 +3435,7 @@ class FinanceService:
                         } for r in records
                     ]
                 }
+
     # ==================== 3. 推荐和团队奖励流水合并查询 ====================
     def get_reward_flow_report(self, user_id: Optional[int] = None,
                                reward_type: Optional[str] = None,
@@ -3634,7 +3669,7 @@ class FinanceService:
                         "pending_auto_count": summary['pending_auto_count'] or 0,
                         "pending_manual_count": summary['pending_manual_count'] or 0,
                         "pending_total_count": (summary['pending_auto_count'] or 0) + (
-                                    summary['pending_manual_count'] or 0)
+                                summary['pending_manual_count'] or 0)
                     },
                     "pagination": {
                         "page": page,
@@ -3664,6 +3699,7 @@ class FinanceService:
                         } for r in records
                     ]
                 }
+
     # ==================== 总会员积分明细报表（新增） ====================
     def get_member_points_detail_report(self, user_id: Optional[int] = None,
                                         start_date: Optional[str] = None,
@@ -3828,6 +3864,7 @@ class FinanceService:
                         } for r in records
                     ]
                 }
+
     # ==================== 平台资金池变动报表（中优先级） ====================
     def get_pool_flow_report(self, account_type: str,
                              start_date: str, end_date: str,
@@ -3950,6 +3987,7 @@ class FinanceService:
                     "data_source": "finance_accounts + account_flow",
                     "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 }
+
     # ==================== 联创星级点数流水报表 ====================
     def get_unilevel_points_flow_report(self, user_id: Optional[int] = None,
                                         level: Optional[int] = None,
@@ -5035,7 +5073,6 @@ class FinanceService:
                     "remark": f"按member_points降序排列，支持分页查询。用户26为平台积分池(company_points)特殊发放对象，发放点数=company_points×积分值，同时扣除等额company_points积分。"
                 }
 
-
     def get_order_points_flow_report(self, start_date: str, end_date: str,
                                      user_id: Optional[int] = None,
                                      order_no: Optional[str] = None,
@@ -5518,6 +5555,7 @@ class FinanceService:
                     },
                     "users": result
                 }
+
     # ==================== 联创星级点数报表 ====================
     def get_unilevel_points_report(self, user_id: Optional[int] = None) -> Dict[str, Any]:
         """查询联创星级点数明细报表"""
@@ -5946,7 +5984,7 @@ class FinanceService:
                         'total_income': float((af_summary['total_income'] or 0) + (wsr_summary['total_subsidy'] or 0)),
                         'total_expense': float(af_summary['total_expense'] or 0),
                         'net_flow': float((af_summary['total_income'] or 0) + (af_summary['total_expense'] or 0) + (
-                                    wsr_summary['total_subsidy'] or 0)),
+                                wsr_summary['total_subsidy'] or 0)),
                         'breakdown': {
                             'subsidy_points_income': float(
                                 (af_summary.get('total_subsidy', 0) or 0) + (wsr_summary['total_subsidy'] or 0)),
@@ -5970,6 +6008,7 @@ class FinanceService:
                     },
                     'records': detailed_records
                 }
+
     def donate_true_total_points(self, user_id: int, amount: float) -> Dict[str, Any]:
         """
         用户捐赠 true_total_points 到公益基金账户（1:1兑换为资金）
@@ -6728,14 +6767,14 @@ class FinanceService:
                     },
                     "grand_total": {
                         "total_records": (member_summary['count'] or 0) + (merchant_summary['count'] or 0) + (
-                                    company_summary['count'] or 0),
+                                company_summary['count'] or 0),
                         "total_income": float((member_summary['income'] or 0) + (merchant_summary['income'] or 0) + (
-                                    company_summary['income'] or 0)),
+                                company_summary['income'] or 0)),
                         "total_expense": float((member_summary['expense'] or 0) + (merchant_summary['expense'] or 0) + (
-                                    company_summary['expense'] or 0)),
+                                company_summary['expense'] or 0)),
                         "net_change": float(
                             (member_summary['net_change'] or 0) + (merchant_summary['net_change'] or 0) + (
-                                        company_summary['net_change'] or 0)),
+                                    company_summary['net_change'] or 0)),
                         "current_balance_total": total_balance_sum,  # ← 三种积分余额总和
                         "breakdown": {  # ← 明细构成
                             "member_points_balance": current_balances['member_points'],
@@ -7023,6 +7062,8 @@ class FinanceService:
                     },
                     "records": formatted_records
                 }
+
+
 # ==================== 订单系统财务功能（来自 order/finance.py） ====================
 
 def _build_team_rewards_select(cursor, asset_fields: List[str] = None) -> tuple:
@@ -7174,7 +7215,7 @@ def _execute_split(cur, order_number: str, total: Decimal):
 
     for account_type, ratio in pools_to_assign.items():
         if account_type == 'public_welfare':
-            continue          # ← 新增：不再重复写公益基金
+            continue  # ← 新增：不再重复写公益基金
         try:
             amt = total * ratio
             # 单元级日志：准备分配到指定资金池的金额与比例
@@ -7253,7 +7294,8 @@ def reverse_split_on_refund(order_number: str):
                 )
                 cur.execute(select_sql)
                 merchant_balance_row = cur.fetchone()
-                merchant_balance_after = merchant_balance_row["merchant_balance"] if merchant_balance_row else Decimal("0")
+                merchant_balance_after = merchant_balance_row["merchant_balance"] if merchant_balance_row else Decimal(
+                    "0")
 
                 # 记录回冲流水
                 cur.execute(

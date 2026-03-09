@@ -10,6 +10,7 @@ import json
 # 使用统一的日志配置
 logger = get_logger(__name__)
 
+
 class DatabaseManager:
     def __init__(self):
         self._ensure_database_exists()
@@ -35,7 +36,7 @@ class DatabaseManager:
     def _ensure_table_columns(self, cursor, table_name: str, required_columns: dict):
         """
         确保表的必需字段存在，如果不存在则添加
-        
+
         Args:
             cursor: 数据库游标
             table_name: 表名
@@ -45,7 +46,7 @@ class DatabaseManager:
             # 获取表的现有字段
             cursor.execute(f"SHOW COLUMNS FROM {table_name}")
             existing_columns = {row['Field'] for row in cursor.fetchall()}
-            
+
             # 检查并添加缺失的字段
             for column_name, column_def in required_columns.items():
                 if column_name not in existing_columns:
@@ -70,14 +71,14 @@ class DatabaseManager:
                     name VARCHAR(100) NOT NULL,
                     email VARCHAR(100) UNIQUE,
                     member_level TINYINT NOT NULL DEFAULT 0,
-                    points DECIMAL(12,4) NOT NULL DEFAULT 0.0000 COMMENT '联创星级专用点数(用于计算总获得点数)',
-                    subsidy_points DECIMAL(12,4) NOT NULL DEFAULT 0.0000 COMMENT '周补贴专用点数(用于计算总获得点数)',
-                    team_reward_points DECIMAL(12,4) NOT NULL DEFAULT 0.0000 COMMENT '团队奖励专用点数(用于计算总获得点数)',
-                    referral_points DECIMAL(12,4) NOT NULL DEFAULT 0.0000 COMMENT '推荐奖励专用点数(用于计算总获得点数)',
-                    true_total_points DECIMAL(12,4) NOT NULL DEFAULT 0.0000 COMMENT '联创星级、周补贴、团队奖励、推荐奖励点数真实总数，发放联创星级、周补贴、团队奖励、推荐奖励点数时会额外发放一份进入这里',
+                    points DECIMAL(12,6) NOT NULL DEFAULT 0.000000 COMMENT '联创星级专用点数(用于计算总获得点数)',
+                    subsidy_points DECIMAL(12,6) NOT NULL DEFAULT 0.000000 COMMENT '周补贴专用点数(用于计算总获得点数)',
+                    team_reward_points DECIMAL(12,6) NOT NULL DEFAULT 0.000000 COMMENT '团队奖励专用点数(用于计算总获得点数)',
+                    referral_points DECIMAL(12,6) NOT NULL DEFAULT 0.000000 COMMENT '推荐奖励专用点数(用于计算总获得点数)',
+                    true_total_points DECIMAL(12,6) NOT NULL DEFAULT 0.000000 COMMENT '联创星级、周补贴、团队奖励、推荐奖励点数真实总数，发放联创星级、周补贴、团队奖励、推荐奖励点数时会额外发放一份进入这里',
                     promotion_balance DECIMAL(14,2) NOT NULL DEFAULT 0.00,
-                    member_points DECIMAL(12,4) NOT NULL DEFAULT 0.0000,
-                    merchant_points DECIMAL(12,4) NOT NULL DEFAULT 0.0000,
+                    member_points DECIMAL(12,6) NOT NULL DEFAULT 0.000000,
+                    merchant_points DECIMAL(12,6) NOT NULL DEFAULT 0.000000,
                     merchant_balance DECIMAL(14,2) NOT NULL DEFAULT 0.00,
                     status TINYINT NOT NULL DEFAULT 1,
                     level_changed_at DATETIME NULL,
@@ -121,7 +122,7 @@ class DatabaseManager:
                     buy_rule TEXT,
                     freight DECIMAL(12,2) DEFAULT 0.00,
                     -- ✅ 新增字段：积分抵扣上限（支持小数，精确到4位）
-                    max_points_discount DECIMAL(12,4) DEFAULT NULL COMMENT '积分抵扣上限',
+                    max_points_discount DECIMAL(12,6) DEFAULT NULL COMMENT '积分抵扣上限',
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                     INDEX idx_is_member_product (is_member_product),
@@ -140,7 +141,7 @@ class DatabaseManager:
                     applyment_id BIGINT UNSIGNED DEFAULT NULL COMMENT '关联微信进件单ID（线下订单必填）',
                     total_amount DECIMAL(12,2) NOT NULL,
                     original_amount DECIMAL(12,2) DEFAULT 0.00,
-                    points_discount DECIMAL(12,4) NOT NULL DEFAULT 0.0000,
+                    points_discount DECIMAL(12,6) NOT NULL DEFAULT 0.000000,
                     is_member_order TINYINT(1) NOT NULL DEFAULT 0,
                     is_vip_item TINYINT(1) DEFAULT 0 COMMENT '1=含会员商品（兼容订单系统）',
                     status VARCHAR(30) NOT NULL DEFAULT 'pending_pay',
@@ -286,8 +287,8 @@ class DatabaseManager:
                 CREATE TABLE IF NOT EXISTS points_log (
                     id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
                     user_id BIGINT UNSIGNED NOT NULL,
-                    change_amount DECIMAL(12,4) NOT NULL,
-                    balance_after DECIMAL(12,4) NOT NULL,
+                    change_amount DECIMAL(12,6) NOT NULL,
+                    balance_after DECIMAL(12,6) NOT NULL,
                     type ENUM('member','merchant','company') NOT NULL,
                     reason VARCHAR(255),
                     related_order BIGINT UNSIGNED,
@@ -310,7 +311,7 @@ class DatabaseManager:
                     id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
                     user_id BIGINT UNSIGNED NOT NULL,
                     reward_type ENUM('referral','team') NOT NULL,
-                    amount DECIMAL(12,4) NOT NULL,
+                    amount DECIMAL(12,6) NOT NULL,
                     order_id BIGINT UNSIGNED NOT NULL,
                     layer TINYINT DEFAULT NULL,
                     status ENUM('pending','approved','rejected') DEFAULT 'pending',
@@ -804,7 +805,7 @@ class DatabaseManager:
         # 定义必需字段（用于检查和更新已存在的表）
         required_columns = {
             'users': {
-                'member_points': 'member_points DECIMAL(12,4) NOT NULL DEFAULT 0.0000',
+                'member_points': 'member_points DECIMAL(12,6) NOT NULL DEFAULT 0.000000',
                 'merchant_points': 'merchant_points DECIMAL(12,4) NOT NULL DEFAULT 0.0000',
                 'withdrawable_balance': 'withdrawable_balance DECIMAL(14,2) NOT NULL DEFAULT 0.00 COMMENT \'可提现余额\'',
                 'is_merchant': 'is_merchant TINYINT(1) NOT NULL DEFAULT 0 COMMENT \'判断是不是商家\'',
@@ -888,11 +889,11 @@ class DatabaseManager:
                 'qrcode_expire': "qrcode_expire DATETIME DEFAULT NULL COMMENT '码过期时间'",
             },
         }
-        
+
         for table_name, sql in tables.items():
             cursor.execute(sql)
             logger.debug(f"表 `{table_name}` 已创建/确认")
-            
+
             # 检查并更新表结构（添加缺失的字段）
             if table_name in required_columns:
                 self._ensure_table_columns(cursor, table_name, required_columns[table_name])
@@ -943,11 +944,11 @@ class DatabaseManager:
                 AND TABLE_NAME IN ('cart', 'users', 'products')
             """)
             existing_tables = {row['TABLE_NAME'] for row in cursor.fetchall()}
-            
+
             if 'cart' not in existing_tables or 'users' not in existing_tables or 'products' not in existing_tables:
                 logger.debug("⚠️ cart 表或引用表不存在，跳过外键添加")
                 return
-            
+
             # 检查外键是否已存在
             cursor.execute("""
                 SELECT CONSTRAINT_NAME 
@@ -957,7 +958,7 @@ class DatabaseManager:
                 AND CONSTRAINT_TYPE = 'FOREIGN KEY'
             """)
             existing_fks = [row['CONSTRAINT_NAME'] for row in cursor.fetchall()]
-            
+
             if 'cart_ibfk_1' not in existing_fks:
                 cursor.execute("""
                     ALTER TABLE cart 
@@ -965,7 +966,7 @@ class DatabaseManager:
                     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
                 """)
                 logger.debug("cart 表外键约束 cart_ibfk_1 已添加")
-            
+
             if 'cart_ibfk_2' not in existing_fks:
                 cursor.execute("""
                     ALTER TABLE cart 
@@ -988,11 +989,11 @@ class DatabaseManager:
                 AND TABLE_NAME IN ('refunds', 'orders')
             """)
             existing_tables = {row['TABLE_NAME'] for row in cursor.fetchall()}
-            
+
             if 'refunds' not in existing_tables or 'orders' not in existing_tables:
                 logger.debug("⚠️ refunds 表或 orders 表不存在，跳过外键添加")
                 return
-            
+
             # 检查 orders 表是否有 order_number 列
             cursor.execute("""
                 SELECT COLUMN_NAME 
@@ -1004,7 +1005,7 @@ class DatabaseManager:
             if cursor.fetchone() is None:
                 logger.debug("⚠️ orders 表缺少 order_number 列，跳过外键添加")
                 return
-            
+
             # 检查外键是否已存在
             cursor.execute("""
                 SELECT CONSTRAINT_NAME 
@@ -1014,7 +1015,7 @@ class DatabaseManager:
                 AND CONSTRAINT_TYPE = 'FOREIGN KEY'
             """)
             existing_fks = [row['CONSTRAINT_NAME'] for row in cursor.fetchall()]
-            
+
             if 'refunds_ibfk_1' not in existing_fks:
                 cursor.execute("""
                     ALTER TABLE refunds 
@@ -1037,7 +1038,7 @@ class DatabaseManager:
                 AND CONSTRAINT_TYPE = 'FOREIGN KEY'
             """)
             existing_fks = [row['CONSTRAINT_NAME'] for row in cursor.fetchall()]
-            
+
             if 'orders_ibfk_1' not in existing_fks:
                 cursor.execute("""
                     ALTER TABLE orders 
@@ -1059,7 +1060,7 @@ class DatabaseManager:
                 AND CONSTRAINT_TYPE = 'FOREIGN KEY'
             """)
             existing_fks = [row['CONSTRAINT_NAME'] for row in cursor.fetchall()]
-            
+
             if 'order_items_ibfk_1' not in existing_fks:
                 cursor.execute("""
                     ALTER TABLE order_items 
@@ -1067,7 +1068,7 @@ class DatabaseManager:
                     FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE
                 """)
                 logger.debug("order_items 表外键约束 order_items_ibfk_1 已添加")
-            
+
             if 'order_items_ibfk_2' not in existing_fks:
                 cursor.execute("""
                     ALTER TABLE order_items 
@@ -1089,11 +1090,11 @@ class DatabaseManager:
                 AND TABLE_NAME IN ('addresses', 'users')
             """)
             existing_tables = {row['TABLE_NAME'] for row in cursor.fetchall()}
-            
+
             if 'addresses' not in existing_tables or 'users' not in existing_tables:
                 logger.debug("⚠️ addresses 表或 users 表不存在，跳过外键添加")
                 return
-            
+
             cursor.execute("""
                 SELECT CONSTRAINT_NAME 
                 FROM information_schema.TABLE_CONSTRAINTS 
@@ -1102,7 +1103,7 @@ class DatabaseManager:
                 AND CONSTRAINT_TYPE = 'FOREIGN KEY'
             """)
             existing_fks = [row['CONSTRAINT_NAME'] for row in cursor.fetchall()]
-            
+
             if 'addresses_ibfk_1' not in existing_fks:
                 cursor.execute("""
                     ALTER TABLE addresses 
@@ -1125,7 +1126,7 @@ class DatabaseManager:
                 AND CONSTRAINT_TYPE = 'FOREIGN KEY'
             """)
             existing_fks = [row['CONSTRAINT_NAME'] for row in cursor.fetchall()]
-            
+
             if 'banner_ibfk_1' not in existing_fks:
                 cursor.execute("""
                     ALTER TABLE banner 
@@ -1147,7 +1148,7 @@ class DatabaseManager:
                 AND CONSTRAINT_TYPE = 'FOREIGN KEY'
             """)
             existing_fks = [row['CONSTRAINT_NAME'] for row in cursor.fetchall()]
-            
+
             if 'product_attributes_ibfk_1' not in existing_fks:
                 cursor.execute("""
                     ALTER TABLE product_attributes 
@@ -1169,7 +1170,7 @@ class DatabaseManager:
                 AND CONSTRAINT_TYPE = 'FOREIGN KEY'
             """)
             existing_fks = [row['CONSTRAINT_NAME'] for row in cursor.fetchall()]
-            
+
             if 'product_skus_ibfk_1' not in existing_fks:
                 cursor.execute("""
                     ALTER TABLE product_skus 
@@ -1191,11 +1192,11 @@ class DatabaseManager:
                 AND TABLE_NAME IN ('user_unilevel', 'users')
             """)
             existing_tables = {row['TABLE_NAME'] for row in cursor.fetchall()}
-            
+
             if 'user_unilevel' not in existing_tables or 'users' not in existing_tables:
                 logger.debug("⚠️ user_unilevel 表或 users 表不存在，跳过外键添加")
                 return
-            
+
             cursor.execute("""
                 SELECT CONSTRAINT_NAME 
                 FROM information_schema.TABLE_CONSTRAINTS 
@@ -1204,7 +1205,7 @@ class DatabaseManager:
                 AND CONSTRAINT_TYPE = 'FOREIGN KEY'
             """)
             existing_fks = [row['CONSTRAINT_NAME'] for row in cursor.fetchall()]
-            
+
             if 'user_unilevel_ibfk_1' not in existing_fks:
                 cursor.execute("""
                     ALTER TABLE user_unilevel 
@@ -1226,11 +1227,11 @@ class DatabaseManager:
                 AND TABLE_NAME IN ('directors', 'users')
             """)
             existing_tables = {row['TABLE_NAME'] for row in cursor.fetchall()}
-            
+
             if 'directors' not in existing_tables or 'users' not in existing_tables:
                 logger.debug("⚠️ directors 表或 users 表不存在，跳过外键添加")
                 return
-            
+
             cursor.execute("""
                 SELECT CONSTRAINT_NAME 
                 FROM information_schema.TABLE_CONSTRAINTS 
@@ -1239,7 +1240,7 @@ class DatabaseManager:
                 AND CONSTRAINT_TYPE = 'FOREIGN KEY'
             """)
             existing_fks = [row['CONSTRAINT_NAME'] for row in cursor.fetchall()]
-            
+
             if 'directors_ibfk_1' not in existing_fks:
                 cursor.execute("""
                     ALTER TABLE directors 
@@ -1297,7 +1298,8 @@ class DatabaseManager:
             """)
             existing = [r['CONSTRAINT_NAME'] for r in cursor.fetchall()]
             if 'fk_wx_applyment_user' not in existing:
-                cursor.execute("ALTER TABLE wx_applyment ADD CONSTRAINT fk_wx_applyment_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE")
+                cursor.execute(
+                    "ALTER TABLE wx_applyment ADD CONSTRAINT fk_wx_applyment_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE")
                 logger.debug("✅ wx_applyment 外键已添加")
             else:
                 logger.debug("✅ wx_applyment 外键已存在，跳过添加")
@@ -1316,7 +1318,8 @@ class DatabaseManager:
             """)
             existing = [r['CONSTRAINT_NAME'] for r in cursor.fetchall()]
             if 'fk_media_user' not in existing:
-                cursor.execute("ALTER TABLE wx_applyment_media ADD CONSTRAINT fk_media_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE")
+                cursor.execute(
+                    "ALTER TABLE wx_applyment_media ADD CONSTRAINT fk_media_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE")
                 logger.debug("✅ wx_applyment_media 外键已添加")
             else:
                 logger.debug("✅ wx_applyment_media 外键已存在，跳过添加")
@@ -1335,7 +1338,8 @@ class DatabaseManager:
             """)
             existing = [r['CONSTRAINT_NAME'] for r in cursor.fetchall()]
             if 'fk_merchant_account_user' not in existing:
-                cursor.execute("ALTER TABLE merchant_settlement_accounts ADD CONSTRAINT fk_merchant_account_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE")
+                cursor.execute(
+                    "ALTER TABLE merchant_settlement_accounts ADD CONSTRAINT fk_merchant_account_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE")
                 logger.debug("✅ merchant_settlement_accounts 外键已添加")
             else:
                 logger.debug("✅ merchant_settlement_accounts 外键已存在，跳过添加")
@@ -1354,7 +1358,8 @@ class DatabaseManager:
             """)
             existing = [r['CONSTRAINT_NAME'] for r in cursor.fetchall()]
             if 'fk_realname_user' not in existing:
-                cursor.execute("ALTER TABLE merchant_realname_verification ADD CONSTRAINT fk_realname_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE")
+                cursor.execute(
+                    "ALTER TABLE merchant_realname_verification ADD CONSTRAINT fk_realname_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE")
                 logger.debug("✅ merchant_realname_verification 外键已添加")
             else:
                 logger.debug("✅ merchant_realname_verification 外键已存在，跳过添加")
@@ -1373,12 +1378,14 @@ class DatabaseManager:
             """)
             existing = [r['CONSTRAINT_NAME'] for r in cursor.fetchall()]
             if 'fk_bankcard_op_user' not in existing:
-                cursor.execute("ALTER TABLE user_bankcard_operations ADD CONSTRAINT fk_bankcard_op_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE")
+                cursor.execute(
+                    "ALTER TABLE user_bankcard_operations ADD CONSTRAINT fk_bankcard_op_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE")
             else:
                 logger.debug("✅ user_bankcard_operations: fk_bankcard_op_user 已存在，跳过添加")
 
             if 'fk_bankcard_op_target' not in existing:
-                cursor.execute("ALTER TABLE user_bankcard_operations ADD CONSTRAINT fk_bankcard_op_target FOREIGN KEY (target_id) REFERENCES merchant_settlement_accounts(id) ON DELETE CASCADE")
+                cursor.execute(
+                    "ALTER TABLE user_bankcard_operations ADD CONSTRAINT fk_bankcard_op_target FOREIGN KEY (target_id) REFERENCES merchant_settlement_accounts(id) ON DELETE CASCADE")
             else:
                 logger.debug("✅ user_bankcard_operations: fk_bankcard_op_target 已存在，跳过添加")
 
@@ -1607,7 +1614,7 @@ def create_test_data():
 
 def init_db():
     """一键初始化数据库（兼容 order 模块的接口）
-    
+
     这是 initialize_database() 的别名，用于保持与 order 模块的兼容性。
     """
     initialize_database()
@@ -1616,13 +1623,13 @@ def init_db():
 
 def auto_receive_task(db_cfg: dict = None):
     """自动收货和结算守护进程
-    
+
     该函数会启动一个后台线程，每小时检查一次待收货订单，
     如果订单超过自动收货时间，则自动完成订单并结算给商家。
-    
+
     参数:
         db_cfg: 数据库配置字典（可选，默认使用 get_db_config()）
-    
+
     注意:
         这是一个守护进程，会在后台持续运行。
         需要在应用启动时调用此函数。
@@ -1630,7 +1637,7 @@ def auto_receive_task(db_cfg: dict = None):
     import threading
     import time
     from datetime import datetime
-    
+
     def run():
         while True:
             try:
@@ -1655,7 +1662,7 @@ def auto_receive_task(db_cfg: dict = None):
             except Exception as e:
                 logger.error(f"[auto_receive] 异常: {e}")
             time.sleep(3600)  # 每小时检查一次
-    
+
     t = threading.Thread(target=run, daemon=True)
     t.start()
     logger.info("自动收货守护进程已启动")
@@ -1665,27 +1672,27 @@ def auto_receive_task(db_cfg: dict = None):
 
 def _fix_pinyin():
     """补全商品拼音
-    
+
     该函数会检查所有商品，如果 pinyin 字段为空，则自动生成拼音。
     可重复执行，幂等操作。
     """
     try:
         from pypinyin import lazy_pinyin, Style
         from core.database import get_conn
-        
+
         with get_conn() as conn:
             with conn.cursor() as cur:
                 # 查询所有商品
                 cur.execute("SELECT id, name, pinyin FROM products")
                 products = cur.fetchall()
-                
+
                 updated_count = 0
                 for product in products:
                     if not product.get('pinyin'):
                         pinyin = ' '.join(lazy_pinyin(product['name'], style=Style.NORMAL)).upper()
                         cur.execute("UPDATE products SET pinyin = %s WHERE id = %s", (pinyin, product['id']))
                         updated_count += 1
-                
+
                 conn.commit()
                 logger.debug(f"商品拼音补全完成，更新了 {updated_count} 条记录")
     except ImportError:
@@ -1694,12 +1701,12 @@ def _fix_pinyin():
         logger.error(f"❌ 拼音补全失败: {e}")
 
 
-
 # 在文件末尾添加
 def start_background_tasks():
     """启动后台任务"""
     from core.scheduler import scheduler
     scheduler.start()
+
 
 # 在 initialize_database 函数后调用
 def initialize_database():

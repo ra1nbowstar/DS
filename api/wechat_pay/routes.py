@@ -8,6 +8,8 @@ from services.finance_service import FinanceService
 from decimal import Decimal
 from services.wechat_applyment_service import WechatApplymentService
 from datetime import datetime
+import time
+import uuid
 import json
 import logging
 import base64
@@ -109,9 +111,17 @@ async def create_jsapi_order(request: Request):
                 payable_cents -= int(pending_points * Decimal('100'))
                 payable_cents -= int(coupon_amt * Decimal('100'))
 
-                # ==================== 修改版本：应付≤0时报错，提示零元订单无需支付 ====================
+                # ==================== 修改：零元订单无需支付，直接返回模拟支付参数 ====================
                 if payable_cents <= 0:
-                    raise HTTPException(status_code=400, detail="零元订单无需支付，请直接下单")
+                    logger.info(f"零元订单 {out_trade_no} 无需支付，返回模拟支付参数")
+                    return {
+                        "appId": settings.WECHAT_APP_ID,
+                        "timeStamp": str(int(time.time())),
+                        "nonceStr": uuid.uuid4().hex,
+                        "package": "prepay_id=ZERO_ORDER",
+                        "signType": "RSA",
+                        "paySign": "ZERO_ORDER_SIGN"
+                    }
 
                 if total_fee_client_int != payable_cents:
                     logger.warning(
