@@ -1,16 +1,16 @@
 # core/scheduler.py
 import asyncio
+import fcntl  # 新增：用于文件锁
+import sys
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from core.database import get_conn
-from core.wx_pay_client import WeChatPayClient  # ✅ 修复：WechatPayClient → WeChatPayClient
+from core.wx_pay_client import WeChatPayClient
 import logging
 from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
-# Lower scheduler log level to reduce noise in shared logs
-logger.setLevel(logging.WARNING)
-# Suppress APScheduler info/debug noise
+logger.setLevel(logging.INFO)
 logging.getLogger("apscheduler").setLevel(logging.WARNING)
 logging.getLogger("apscheduler.scheduler").setLevel(logging.WARNING)
 
@@ -18,12 +18,24 @@ logging.getLogger("apscheduler.scheduler").setLevel(logging.WARNING)
 class TaskScheduler:
     def __init__(self):
         self.scheduler = BackgroundScheduler()
-        self.pay_client = WeChatPayClient()  # ✅ 修复：WechatPayClient → WeChatPayClient
+        self.pay_client = WeChatPayClient()
+        self.lock_file = None  # 新增：锁文件句柄
 
     def start(self):
-        """启动所有定时任务"""
-        # 延迟导入，避免启动时循环依赖
-        # 已移除微信发货管理模块的导入
+        """启动所有定时任务（带进程间锁）"""
+        # ========== 新增：尝试获取文件锁 ==========
+        lock_file_path = "/tmp/scheduler.lock"
+        try:
+            self.lock_file = open(lock_file_path, "w")
+            fcntl.flock(self.lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            logger.info("另一个进程已持有调度器锁，本进程跳过启动定时任务")
+            self.lock_file = None
+            return
+        except Exception as e:
+            logger.error(f"获取调度器锁失败: {e}，将继续启动（可能导致重复）")
+            self.lock_file = None
+        # ========================================
 
         # 每天凌晨4点清理过期草稿
         self.scheduler.add_job(
@@ -52,10 +64,11 @@ class TaskScheduler:
         # 每天零点自动发放日补贴
         self.scheduler.add_job(
             self.auto_distribute_daily_subsidy,
-            CronTrigger(hour=0, minute=0),
+            CronTrigger(hour=0, minute=0),  # 请根据实际需要调整时间
             id="daily_subsidy_auto",
             replace_existing=True,
-            misfire_grace_time=3600
+            misfire_grace_time=3600,
+            coalesce=True  # 新增：合并错过的执行
         )
 
         # 每月1日零点自动发放联创分红
@@ -76,9 +89,9 @@ class TaskScheduler:
         )
 
         self.scheduler.start()
-        logger.info("定时任务管理器已启动")
+        logger.info("定时任务管理器已启动（当前进程持有锁）")
 
-    # ==================== 新增方法：执行周补贴发放 ====================
+    # ==================== 日补贴发放 ====================
     def auto_distribute_daily_subsidy(self):
         """每天零点自动发放日补贴"""
         try:
@@ -89,7 +102,7 @@ class TaskScheduler:
             logger.info(f"执行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
             service = FinanceService()
-            success = service.distribute_daily_subsidy()  # 调用新的 daily 方法
+            success = service.distribute_daily_subsidy()
 
             if success:
                 logger.info("[定时任务] 日补贴发放成功完成")
@@ -99,7 +112,7 @@ class TaskScheduler:
         except Exception as e:
             logger.error(f"[定时任务] 日补贴发放异常: {str(e)}", exc_info=True)
 
-    # ==================== 新增方法：执行联创分红发放 ====================
+    # ==================== 联创分红发放 ====================
     def auto_distribute_unilevel_dividend(self):
         """每月1日零点自动发放联创分红"""
         try:
@@ -121,10 +134,19 @@ class TaskScheduler:
             logger.error(f"[定时任务] 联创分红发放异常: {str(e)}", exc_info=True)
 
     def shutdown(self):
-        """关闭定时任务"""
-        self.scheduler.shutdown()
+        """关闭定时任务，并释放锁"""
+        if hasattr(self, 'scheduler') and self.scheduler.running:
+            self.scheduler.shutdown()
+        # ========== 新增：释放文件锁 ==========
+        if self.lock_file:
+            try:
+                fcntl.flock(self.lock_file, fcntl.LOCK_UN)
+                self.lock_file.close()
+            except Exception as e:
+                logger.warning(f"释放调度器锁时出错: {e}")
         logger.info("定时任务管理器已关闭")
 
+    # ==================== 原有方法完整保留 ====================
     def clean_expired_bankcard_codes(self):
         """清理过期银行卡验证码"""
         try:

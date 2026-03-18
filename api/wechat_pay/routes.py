@@ -566,10 +566,19 @@ async def handle_transaction_success(data: dict):
 
     logger.info(f"支付成功: 订单号={out_trade_no}, 微信流水号={transaction_id}, 金额={amount}")
 
-    if out_trade_no.startswith("OFF"):
-        await _handle_offline_pay_success(out_trade_no, transaction_id, amount, data)
-    else:
-        await _handle_online_pay_success(out_trade_no, transaction_id, amount, data)
+    try:
+        if out_trade_no.startswith("OFF"):
+            await _handle_offline_pay_success(out_trade_no, transaction_id, amount, data)
+        else:
+            await _handle_online_pay_success(out_trade_no, transaction_id, amount, data)
+    except ValueError as e:
+        # 业务错误：订单不存在、金额不一致等，记录但返回成功（避免微信重试）
+        logger.error(f"支付成功处理失败（业务错误）: {e}", exc_info=True)
+        # 可选：将异常记录到专门的表供人工对账
+    except Exception as e:
+        # 临时性错误：数据库连接、微信API调用失败等，继续抛出让微信重试
+        logger.error(f"支付成功处理发生未知异常: {e}", exc_info=True)
+        raise
 
 
 async def _handle_offline_pay_success(order_no: str, transaction_id: str, amount: int, data: dict):
@@ -689,33 +698,49 @@ async def _handle_online_pay_success(order_no: str, transaction_id: str, amount:
                 # 优惠券处理（仅锁定和核销，不再参与金额计算）
                 coupon_amt = Decimal('0')
                 if order.get('pending_coupon_id'):
+                    # 先检查订单状态，防止重复处理
+                    if order.get('status') != 'pending_pay':
+                        logger.info(
+                            f"订单 {order_no} 状态已不是 pending_pay（当前={order['status']}），可能已处理，直接返回")
+                        return
+
                     cur.execute(
                         """SELECT amount, status, valid_to, user_id 
                            FROM coupons 
                            WHERE id = %s 
-                           AND status = 'unused' 
-                           AND valid_to >= CURDATE()
                            FOR UPDATE""",
                         (order['pending_coupon_id'],)
                     )
                     coupon_row = cur.fetchone()
-                    if not coupon_row:
-                        logger.error(f"订单 {order_no} 优惠券校验失败: ID={order['pending_coupon_id']}")
-                        raise ValueError(f"优惠券无效或已失效: {order['pending_coupon_id']}")
-                    if coupon_row['user_id'] != order['user_id']:
-                        logger.error(
-                            f"订单 {order_no} 优惠券用户不匹配: 券用户={coupon_row['user_id']}, 订单用户={order['user_id']}"
-                        )
-                        raise ValueError("优惠券不属于当前订单用户")
-                    coupon_amt = Decimal(str(coupon_row['amount']))
-                    # 标记优惠券已使用
+
+                    # 优惠券不可用的情况（已使用、过期、不存在）
+                    if not coupon_row or coupon_row['status'] != 'unused' or coupon_row[
+                        'valid_to'] < datetime.now().date():
+                        # 如果订单仍是 pending_pay，说明数据异常，需记录错误但返回成功（避免微信重试）
+                        if order.get('status') == 'pending_pay':
+                            logger.error(
+                                f"订单 {order_no} 优惠券 {order['pending_coupon_id']} 状态异常 "
+                                f"(status={coupon_row['status'] if coupon_row else 'not found'})，但订单仍为 pending_pay，需人工介入"
+                            )
+                        else:
+                            logger.info(f"订单 {order_no} 优惠券不可用但订单状态已变更，视为已处理")
+                        return
+
+                    # 正常核销优惠券
                     cur.execute(
-                        "UPDATE coupons SET status='used', used_at=NOW() WHERE id=%s",
+                        "UPDATE coupons SET status='used', used_at=NOW() WHERE id=%s AND status='unused'",
                         (order['pending_coupon_id'],)
                     )
-                    logger.info(
-                        f"订单 {order_no} 优惠券核销成功: ID={order['pending_coupon_id']}, 金额={coupon_amt}"
-                    )
+                    if cur.rowcount == 0:
+                        logger.warning(
+                            f"订单 {order_no} 优惠券 {order['pending_coupon_id']} 更新影响行数为0，可能已被其他进程使用")
+                        if order.get('status') == 'pending_pay':
+                            logger.error(
+                                f"订单 {order_no} 优惠券核销失败，但订单仍为 pending_pay，可能并发异常，需人工介入")
+                        return
+
+                    # ✅ 记录优惠券金额
+                    coupon_amt = Decimal(str(coupon_row['amount']))
 
                 # 微信支付金额与系统应付金额核对
                 if amount != db_total:
