@@ -76,11 +76,21 @@ register_exception_handlers(app)
 # 在每次应用启动时初始化数据库表结构（幂等）
 @app.on_event("startup")
 def on_startup():
+    logger.info("=" * 50)
     logger.info("应用启动：检查并初始化数据库表结构与后台任务")
     try:
         initialize_database()
+        logger.info("数据库表结构初始化完成")
     except Exception as e:
-        logger.error(f"初始化数据库失败: {e}")
+        logger.error(f"初始化数据库失败: {e}", exc_info=True)
+
+    try:
+        from database_setup import start_background_tasks
+        start_background_tasks()
+        logger.info("✅ 后台定时任务已成功启动")
+    except Exception as e:
+        logger.error(f"❌ 启动后台定时任务失败: {e}", exc_info=True)
+    logger.info("=" * 50)
 
     # 启动时刷新快递公司列表缓存
     '''try:
