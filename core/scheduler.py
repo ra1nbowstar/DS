@@ -45,6 +45,15 @@ class TaskScheduler:
             replace_existing=True
         )
 
+        # ===== 新增：每天凌晨2点同步微信订单状态 =====
+        self.scheduler.add_job(
+            self.sync_wechat_order_status,
+            CronTrigger(hour=2, minute=0),
+            id="sync_wechat_order_status",
+            replace_existing=True
+        )
+        # ===========================================
+
         # 每10分钟轮询审核中的进件状态
         self.scheduler.add_job(
             self.poll_applyment_status,
@@ -292,5 +301,70 @@ class TaskScheduler:
         except Exception as e:
             logger.error(f"检查审核超时失败: {str(e)}", exc_info=True)
 
+    def sync_wechat_order_status(self):
+        """同步微信订单状态（每天凌晨2点执行）"""
+        try:
+            from services.wechat_shipping_v2_service import WechatShippingService
+            from core.database import get_conn
+            from api.order.order import OrderManager
+            import time
+            from datetime import datetime, timedelta
+
+            wx_service = WechatShippingService()
+            # 查询昨天支付的需要同步的订单
+            yesterday_start = int(
+                time.mktime((datetime.now() - timedelta(days=1)).replace(hour=0, minute=0, second=0).timetuple()))
+            yesterday_end = int(
+                time.mktime((datetime.now() - timedelta(days=1)).replace(hour=23, minute=59, second=59).timetuple()))
+
+            last_index = ""
+            while True:
+                result = wx_service.get_order_list(
+                    begin_time=yesterday_start,
+                    end_time=yesterday_end,
+                    last_index=last_index,
+                    page_size=100
+                )
+                if result.get("errcode") != 0:
+                    logger.error(f"查询微信订单列表失败: {result}")
+                    break
+
+                wx_orders = result.get("order_list", [])
+                if not wx_orders:
+                    break
+
+                with get_conn() as conn:
+                    with conn.cursor() as cur:
+                        for wx_order in wx_orders:
+                            transaction_id = wx_order.get("transaction_id")
+                            wx_state = wx_order.get("order_state")  # 1待发货 2已发货 3确认收货 ...
+                            merchant_trade_no = wx_order.get("merchant_trade_no")
+                            if not transaction_id:
+                                continue
+
+                            cur.execute("SELECT id, order_number, status FROM orders WHERE transaction_id=%s",
+                                        (transaction_id,))
+                            local_order = cur.fetchone()
+                            if not local_order:
+                                continue
+
+                            # 状态映射：微信状态3=确认收货，对应本地completed
+                            if wx_state == 3 and local_order['status'] != 'completed':
+                                logger.info(
+                                    f"微信订单状态为已收货，但本地订单 {transaction_id} 状态为 {local_order['status']}，尝试同步")
+                                # 复用 OrderManager.update_status 更新状态，保持一致性
+                                OrderManager.update_status(local_order['order_number'], 'completed', external_conn=conn)
+                                logger.info(f"本地订单 {transaction_id} 状态已同步为 completed")
+                    # ==================== 新增：提交事务 ====================
+                    conn.commit()
+                    # =======================================================
+
+                if not result.get("has_more"):
+                    break
+                last_index = result.get("last_index", "")
+
+            logger.info("微信订单状态同步任务完成")
+        except Exception as e:
+            logger.error(f"同步微信订单状态失败: {e}", exc_info=True)
 
 scheduler = TaskScheduler()

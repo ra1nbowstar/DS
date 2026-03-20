@@ -700,7 +700,7 @@ class OrderManager:
         with get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """SELECT id, user_id, status, order_number
+                    """SELECT id, user_id, status, order_number, transaction_id, delivery_way
                        FROM orders WHERE order_number=%s""",
                     (order_number,)
                 )
@@ -722,6 +722,31 @@ class OrderManager:
                 conn.commit()
 
         logger.info(f"用户 {user_id or order['user_id']} 确认收货成功，订单号：{order_number}")
+
+        # ===== 新增：同步确认收货到微信 =====
+        try:
+            transaction_id = order.get("transaction_id")
+            delivery_way = order.get("delivery_way")  # 新增获取 delivery_way
+            if transaction_id:
+                from services.wechat_shipping_v2_service import WechatShippingService, LOGISTICS_TYPE_MAP
+                import time
+                wx_logistics_type = LOGISTICS_TYPE_MAP.get(delivery_way, 1)
+                # 仅当物流类型为快递(1)或同城配送(2)时才可调用确认收货提醒接口
+                if wx_logistics_type in (1, 2):
+                    wx_service = WechatShippingService()
+                    wx_result = wx_service.notify_confirm_receive(transaction_id, int(time.time()))
+                    if wx_result.get("errcode") == 0:
+                        logger.info(f"订单 {order_number} 确认收货同步微信成功")
+                    else:
+                        logger.error(f"订单 {order_number} 确认收货同步微信失败: {wx_result}")
+                else:
+                    logger.info(f"订单 {order_number} 为非快递物流，无需同步确认收货")
+            else:
+                logger.warning(f"订单 {order_number} 缺少 transaction_id，无法同步确认收货到微信")
+        except Exception as e:
+            logger.error(f"订单 {order_number} 调用微信确认收货接口异常: {e}", exc_info=True)
+        # =====================================
+
         return {"ok": True, "message": "确认收货成功"}
 
     @staticmethod

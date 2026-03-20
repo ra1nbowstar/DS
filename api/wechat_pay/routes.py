@@ -428,6 +428,16 @@ async def wechat_pay_notify(request: Request):
         elif event_type == "TRANSACTION.SUCCESS":
             await handle_transaction_success(decrypted_data)
             return _xml_response("SUCCESS", "OK")
+        # ===== 新增：处理微信发货管理相关事件 =====
+        elif event_type == "trade_manage_remind_shipping":
+            # 微信提醒你需要发货了
+            await handle_trade_manage_remind_shipping(decrypted_data)
+            return _xml_response("SUCCESS", "OK")
+        elif event_type == "trade_manage_order_settlement":
+            # 订单将要结算或已经结算
+            await handle_trade_manage_order_settlement(decrypted_data)
+            return _xml_response("SUCCESS", "OK")
+        # ==========================================
         else:
             logger.warning(f"未知的事件类型: {event_type}; payload={decrypted_data}")
             return _xml_response("FAIL", f"Unknown event_type: {event_type}")
@@ -782,6 +792,20 @@ async def _handle_online_pay_success(order_no: str, transaction_id: str, amount:
         logger.error(f"线上订单支付成功处理失败: {e}", exc_info=True)
         # 异常已由上层捕获，订单状态保持 pending_pay，不会错误更新
 
+async def handle_trade_manage_remind_shipping(data: dict):
+    """处理发货提醒事件"""
+    transaction_id = data.get("transaction_id")
+    merchant_trade_no = data.get("merchant_trade_no")
+    logger.warning(f"收到微信发货提醒: transaction_id={transaction_id}, order_no={merchant_trade_no}。请检查订单发货状态。")
+    # 这里可以触发内部告警或记录
+
+async def handle_trade_manage_order_settlement(data: dict):
+    """处理订单结算事件"""
+    transaction_id = data.get("transaction_id")
+    merchant_trade_no = data.get("merchant_trade_no")
+    settlement_time = data.get("settlement_time")
+    logger.info(f"订单结算通知: transaction_id={transaction_id}, order_no={merchant_trade_no}, 结算时间={settlement_time}")
+    # 可在此处同步本地订单结算状态或对账
 
 # 注册路由函数（原文件末尾已有，保留不变）
 def register_wechat_pay_routes(app):

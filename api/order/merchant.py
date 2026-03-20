@@ -127,6 +127,47 @@ class MerchantManager:
 
                 result["ok"] = True
                 result["message"] = "发货成功"
+
+                # ===== 新增：同步发货信息到微信 =====
+                try:
+                    transaction_id = order_info.get("transaction_id")
+                    openid = order_info.get("openid")
+                    if transaction_id and openid:
+                        from services.wechat_shipping_v2_service import WechatShippingService, LOGISTICS_TYPE_MAP
+                        wx_service = WechatShippingService()
+
+                        # 构建商品描述（简单拼接，可根据实际情况优化）
+                        item_desc = f"订单{order_number}"
+
+                        # 物流类型
+                        wx_logistics_type = LOGISTICS_TYPE_MAP.get(delivery_way, 1)
+
+                        shipping_list = [{
+                            "item_desc": item_desc,
+                        }]
+                        if wx_logistics_type in [1, 2]:  # 快递或同城配送需填写物流单号
+                            shipping_list[0]["tracking_no"] = actual_tracking
+                            # ⚠️ 注意：express_company 需要是微信运力ID（如 "YTO"），不是中文名
+                            shipping_list[0]["express_company"] = express_company or "YTO"
+
+                        wx_result = wx_service.upload_shipping_info(
+                            transaction_id=transaction_id,
+                            openid=openid,
+                            logistics_type=wx_logistics_type,
+                            shipping_list=shipping_list,
+                            delivery_mode=1
+                        )
+
+                        if wx_result.get("errcode") == 0:
+                            logger.info(f"订单 {order_number} 发货信息同步微信成功")
+                        else:
+                            logger.error(f"订单 {order_number} 发货信息同步微信失败: {wx_result}")
+                    else:
+                        logger.warning(f"订单 {order_number} 缺少 transaction_id 或 openid，无法同步微信发货")
+                except Exception as e:
+                    logger.error(f"订单 {order_number} 调用微信发货接口异常: {e}", exc_info=True)
+                # ===================================
+
                 return result
 
     @staticmethod
