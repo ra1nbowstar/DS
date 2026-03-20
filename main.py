@@ -86,8 +86,9 @@ def on_startup():
 
     try:
         from database_setup import start_background_tasks
+        logger.info("准备启动后台任务...")
         start_background_tasks()
-        logger.info("✅ 后台定时任务已成功启动")
+        logger.info("✅ 后台定时任务启动函数已调用")
     except Exception as e:
         logger.error(f"❌ 启动后台定时任务失败: {e}", exc_info=True)
     logger.info("=" * 50)
