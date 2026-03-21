@@ -757,14 +757,17 @@ async def _handle_online_pay_success(order_no: str, transaction_id: str, amount:
                     raise ValueError(f"金额不一致 微信{amount}≠系统{db_total}")
 
                 # 记录优惠券抵扣金额到订单表
+                # 记录优惠券抵扣金额和交易流水号到订单表
                 cur.execute("""
                     UPDATE orders 
                     SET coupon_discount = %s,
-                        original_amount = COALESCE(%s, total_amount)
+                        original_amount = COALESCE(%s, total_amount),
+                        transaction_id = %s
                     WHERE id = %s
                 """, (
                     coupon_amt,
                     order.get('original_amount') or order['total_amount'],
+                    transaction_id,
                     order['id']
                 ))
 
@@ -800,12 +803,29 @@ async def handle_trade_manage_remind_shipping(data: dict):
     # 这里可以触发内部告警或记录
 
 async def handle_trade_manage_order_settlement(data: dict):
-    """处理订单结算事件"""
+    """处理订单结算事件（用户确认收货后微信推送）"""
     transaction_id = data.get("transaction_id")
     merchant_trade_no = data.get("merchant_trade_no")
     settlement_time = data.get("settlement_time")
     logger.info(f"订单结算通知: transaction_id={transaction_id}, order_no={merchant_trade_no}, 结算时间={settlement_time}")
-    # 可在此处同步本地订单结算状态或对账
+
+    if not transaction_id:
+        return
+
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id, order_number, status FROM orders WHERE transaction_id=%s", (transaction_id,))
+                order = cur.fetchone()
+                if order and order['status'] != 'completed':
+                    cur.execute(
+                        "UPDATE orders SET status='completed', completed_at=NOW() WHERE id=%s",
+                        (order['id'],)
+                    )
+                    conn.commit()
+                    logger.info(f"订单 {order['order_number']} 已根据微信结算事件更新为已完成")
+    except Exception as e:
+        logger.error(f"处理订单结算事件失败: {e}", exc_info=True)
 
 # 注册路由函数（原文件末尾已有，保留不变）
 def register_wechat_pay_routes(app):
