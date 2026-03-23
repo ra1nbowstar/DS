@@ -701,6 +701,26 @@ async def distribute_coupons_batch(
 # ===========================================================
 
 
+@router.post("/api/coupons/exchange", response_model=ResponseModel, summary="雨点兑换优惠券（平台批量发放）")
+async def exchange_coupons(
+    service: FinanceService = Depends(get_finance_service)
+):
+    """
+    平台接口：自动为所有有雨点（true_total_points > 0）的用户发放1元优惠券。
+    发放数量 = min(floor(雨点余额), 平台设定的上限)
+    """
+    try:
+        result = service.batch_exchange_coupons()
+        return ResponseModel(
+            success=True,
+            message=result['message'],
+            data=result
+        )
+    except Exception as e:
+        logger.error(f"批量兑换优惠券失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"批量兑换失败: {str(e)}")
+
+
 # ==================== 2. 推荐奖励接口 ====================
 @router.get("/api/rewards/referral", response_model=ResponseModel, summary="查询推荐奖励")
 async def get_referral_rewards(

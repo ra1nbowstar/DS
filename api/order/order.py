@@ -1,6 +1,6 @@
 from services.finance_service import FinanceService
-from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel
+from fastapi import APIRouter, HTTPException, Query, Request, Depends
+from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any, cast
 from core.config import Settings, settings
 from core.database import get_conn
@@ -936,6 +936,12 @@ class OrderManager:
         return excel_data.getvalue()
 
 
+# ---------- 新增：获取 FinanceService 实例 ----------
+def get_finance_service() -> FinanceService:
+    """获取 FinanceService 实例（直接返回）"""
+    return FinanceService()
+
+
 # ---------------- 请求模型 ----------------
 class DeliveryWay(str, Enum):
     platform = "platform"
@@ -1125,6 +1131,12 @@ class OrderExportByTimeRequest(BaseModel):
     end_time: str
     status: Optional[str] = None
 
+# ---------- 新增请求模型 ----------
+class DailySummaryExportRequest(BaseModel):
+    start_date: str = Field(..., description="开始日期 yyyy-MM-dd")
+    end_date: str = Field(..., description="结束日期 yyyy-MM-dd")
+    include_detail: bool = Field(True, description="是否包含明细（优惠券/积分流水）")
+
 
 @router.post("/export", summary="导出订单详情到Excel")
 def export_orders(body: OrderExportRequest):
@@ -1210,6 +1222,28 @@ def export_orders_by_time(body: OrderExportByTimeRequest):
         logger.error(f"按时间导出订单失败: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"导出失败: {str(e)}")
 
+# ---------- 新增：日报表/月报表导出 ----------
+# 将 await 改为直接调用
+@router.post("/export/daily-summary", summary="导出日报表/月报表")
+async def export_daily_summary(
+    request: DailySummaryExportRequest,
+    service: FinanceService = Depends(get_finance_service)
+):
+    try:
+        excel_data = service.export_daily_summary(   # ← 移除 await
+            start_date=request.start_date,
+            end_date=request.end_date,
+            include_detail=request.include_detail
+        )
+        filename = f"daily_summary_{request.start_date}_to_{request.end_date}.xlsx"
+        return StreamingResponse(
+            BytesIO(excel_data),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
+        )
+    except Exception as e:
+        logger.error(f"导出日报表失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 start_order_expire_task()
 # start_wechat_status_sync_task()  # 已废弃

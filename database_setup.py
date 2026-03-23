@@ -515,6 +515,17 @@ class DatabaseManager:
                     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间'
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             """,
+            'system_config': """
+                CREATE TABLE IF NOT EXISTS system_config (
+                    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                    config_key VARCHAR(100) NOT NULL UNIQUE,
+                    config_value TEXT NOT NULL,
+                    description VARCHAR(255),
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    INDEX idx_key (config_key)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            """,
             'user_unilevel': """
                 CREATE TABLE IF NOT EXISTS user_unilevel (
                     id INT AUTO_INCREMENT PRIMARY KEY,
@@ -953,6 +964,7 @@ class DatabaseManager:
                 logger.warning(f"⚠️ 创建索引失败: {e}")
 
         self._init_finance_accounts(cursor)
+        self._init_system_config(cursor)  # 新增
         logger.info("数据库表结构初始化完成")
 
     def _add_cart_foreign_keys(self, cursor):
@@ -1517,6 +1529,19 @@ class DatabaseManager:
             logger.info("已确保各资金池行存在且写入默认 allocation 到 config_params")
         except Exception as e:
             logger.debug(f"⚠️ 确保各资金池 config_params 写入失败（已忽略）: {e}")
+
+    def _init_system_config(self, cursor):
+        """初始化系统配置默认值"""
+        try:
+            cursor.execute("SELECT COUNT(*) as cnt FROM system_config WHERE config_key = 'coupon_exchange_max_count'")
+            if cursor.fetchone()['cnt'] == 0:
+                cursor.execute("""
+                    INSERT INTO system_config (config_key, config_value, description) 
+                    VALUES ('coupon_exchange_max_count', '10', '用户兑换优惠券的最大数量')
+                """)
+                logger.info("✅ 系统配置 coupon_exchange_max_count 已初始化")
+        except Exception as e:
+            logger.warning(f"初始化系统配置失败: {e}")
 
     def create_test_data(self, cursor, conn) -> int:
         logger.info("\n--- 创建测试数据 ---")

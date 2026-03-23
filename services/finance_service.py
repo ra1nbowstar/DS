@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 import time
 import pymysql
+from io import BytesIO
 from core.config import (
     AllocationKey, ALLOCATIONS, MAX_POINTS_VALUE, TAX_RATE,
     POINTS_DISCOUNT_RATE, MEMBER_PRODUCT_PRICE, COUPON_VALID_DAYS,
@@ -7203,6 +7204,503 @@ class FinanceService:
                     },
                     "records": formatted_records
                 }
+
+    def export_daily_summary(self, start_date: str, end_date: str, include_detail: bool = True) -> bytes:
+        """
+        生成日报表及月报表 Excel 文件（增强版）
+
+        日报表（Sheet1）：按天汇总订单、收入、优惠券、积分、所有资金池数据
+        优惠券使用明细（Sheet2）：时间段内所有优惠券使用记录
+        积分变动明细（Sheet3）：时间段内所有积分变动记录（member/merchant/company）
+        月报表（Sheet4）：按月汇总上述数据
+        """
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+        from openpyxl.utils import get_column_letter
+        from datetime import datetime, timedelta
+        from decimal import Decimal
+        import calendar
+
+        # ==================== 1. 参数校验 ====================
+        try:
+            start_dt = datetime.strptime(start_date, "%Y-%m-%d").date()
+            end_dt = datetime.strptime(end_date, "%Y-%m-%d").date()
+        except ValueError:
+            raise FinanceException("日期格式错误，请使用 yyyy-MM-dd")
+
+        if end_dt < start_dt:
+            raise FinanceException("结束日期不能早于开始日期")
+
+        max_days = 31
+        if (end_dt - start_dt).days > max_days:
+            raise FinanceException(f"查询时间范围不能超过 {max_days} 天")
+
+        wb = Workbook()
+        daily_sheet = wb.active
+        daily_sheet.title = "日报表"
+
+        # ==================== 2. 获取所有资金池类型 ====================
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT account_type FROM finance_accounts")
+                all_pools = [row['account_type'] for row in cur.fetchall()]
+                # 定义需要展示的池子顺序（可自定义排序）
+                pool_display_order = [
+                    'platform_revenue_pool', 'public_welfare', 'subsidy_pool',
+                    'director_pool', 'company_points', 'maintain_pool', 'shop_pool',
+                    'city_pool', 'branch_pool', 'fund_pool'
+                ]
+                # 实际存在的池子按顺序排序
+                pool_types = [p for p in pool_display_order if p in all_pools]
+                # 如有其他未在 display_order 中的池子，追加到末尾
+                for p in all_pools:
+                    if p not in pool_types:
+                        pool_types.append(p)
+
+        # ==================== 3. 构建日报表表头 ====================
+        daily_headers = [
+            "日期", "订单总数", "已完成订单数", "原始总金额(元)", "实收总金额(元)",
+            "积分抵扣总额(元)", "优惠券抵扣总额(元)", "优惠券使用张数", "用户积分总收入(元)",
+            "用户积分总支出(元)", "商户积分总收入(元)", "商户积分总支出(元)"
+        ]
+        # 动态添加每个资金池的列
+        for pool_type in pool_types:
+            daily_headers.append(f"{pool_type}净变动(元)")
+
+        self._write_excel_header(daily_sheet, daily_headers)
+
+        # ==================== 4. 逐日统计（复用同一个连接） ====================
+        row_idx = 2
+        daily_data = []  # 用于后续月报表
+
+        # 使用一个连接，循环内不新建
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                current_date = start_dt
+                while current_date <= end_dt:
+                    date_str = current_date.strftime("%Y-%m-%d")
+                    try:
+                        # ---------- 订单数据 ----------
+                        cur.execute("""
+                            SELECT 
+                                COUNT(*) as total_orders,
+                                SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed_orders,
+                                COALESCE(SUM(original_amount), 0) as total_original,
+                                COALESCE(SUM(total_amount), 0) as total_actual,
+                                COALESCE(SUM(points_discount), 0) as total_points_discount,
+                                COALESCE(SUM(coupon_discount), 0) as total_coupon_discount
+                            FROM orders
+                            WHERE DATE(created_at) = %s
+                        """, (date_str,))
+                        order_stat = cur.fetchone()
+
+                        # ---------- 优惠券使用统计 ----------
+                        cur.execute("""
+                            SELECT COUNT(*) as used_count, COALESCE(SUM(amount), 0) as total_amount
+                            FROM coupons
+                            WHERE DATE(used_at) = %s AND status = 'used'
+                        """, (date_str,))
+                        coupon_stat = cur.fetchone()
+
+                        # ---------- 积分变动统计 ----------
+                        cur.execute("""
+                            SELECT 
+                                SUM(CASE WHEN type = 'member' AND change_amount > 0 THEN change_amount ELSE 0 END) as member_income,
+                                SUM(CASE WHEN type = 'member' AND change_amount < 0 THEN -change_amount ELSE 0 END) as member_expense,
+                                SUM(CASE WHEN type = 'merchant' AND change_amount > 0 THEN change_amount ELSE 0 END) as merchant_income,
+                                SUM(CASE WHEN type = 'merchant' AND change_amount < 0 THEN -change_amount ELSE 0 END) as merchant_expense,
+                                SUM(CASE WHEN type = 'company' THEN change_amount ELSE 0 END) as company_net
+                            FROM points_log
+                            WHERE DATE(created_at) = %s
+                        """, (date_str,))
+                        points_stat = cur.fetchone()
+
+                        # ---------- 所有资金池净变动统计 ----------
+                        pool_changes = {}
+                        for pool in pool_types:
+                            cur.execute("""
+                                SELECT COALESCE(SUM(change_amount), 0) as net_change
+                                FROM account_flow
+                                WHERE account_type = %s AND DATE(created_at) = %s
+                            """, (pool, date_str))
+                            row = cur.fetchone()
+                            pool_changes[pool] = float(row['net_change'] or 0)
+
+                        # 组装行数据
+                        row_data = [
+                            date_str,
+                            order_stat['total_orders'],
+                            order_stat['completed_orders'],
+                            float(order_stat['total_original']),
+                            float(order_stat['total_actual']),
+                            float(order_stat['total_points_discount']),
+                            float(order_stat['total_coupon_discount']),
+                            coupon_stat['used_count'],
+                            float(points_stat['member_income'] or 0),
+                            float(points_stat['member_expense'] or 0),
+                            float(points_stat['merchant_income'] or 0),
+                            float(points_stat['merchant_expense'] or 0),
+                        ]
+                        # 添加各资金池净变动
+                        for pool in pool_types:
+                            row_data.append(pool_changes.get(pool, 0))
+
+                        daily_data.append(row_data)
+
+                        # 写入日报表
+                        for col_idx, value in enumerate(row_data, 1):
+                            cell = daily_sheet.cell(row=row_idx, column=col_idx, value=value)
+                            if isinstance(value, (int, float)):
+                                cell.number_format = '#,##0.00'
+                        row_idx += 1
+
+                    except Exception as e:
+                        logger.error(f"生成日报表时 {date_str} 数据失败: {e}")
+                        # 继续处理下一天
+                    current_date += timedelta(days=1)
+
+        # ==================== 5. 优惠券使用明细（Sheet2） ====================
+        if include_detail:
+            coupon_sheet = wb.create_sheet(title="优惠券使用明细")
+            coupon_headers = ["优惠券ID", "用户ID", "用户姓名", "金额(元)", "适用商品范围", "使用时间", "关联订单号"]
+            self._write_excel_header(coupon_sheet, coupon_headers)
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT c.id, c.user_id, u.name as user_name, c.amount, c.applicable_product_type, 
+                               c.used_at, o.order_number
+                        FROM coupons c
+                        LEFT JOIN users u ON c.user_id = u.id
+                        LEFT JOIN orders o ON c.used_at = o.paid_at  -- 假设订单支付时间即使用时间
+                        WHERE c.status = 'used' AND DATE(c.used_at) BETWEEN %s AND %s
+                        ORDER BY c.used_at DESC
+                    """, (start_date, end_date))
+                    rows = cur.fetchall()
+                    for row_idx, row in enumerate(rows, 2):
+                        coupon_sheet.cell(row=row_idx, column=1, value=row['id'])
+                        coupon_sheet.cell(row=row_idx, column=2, value=row['user_id'])
+                        coupon_sheet.cell(row=row_idx, column=3, value=row['user_name'])
+                        coupon_sheet.cell(row=row_idx, column=4, value=float(row['amount']))
+                        coupon_sheet.cell(row=row_idx, column=5, value=row['applicable_product_type'])
+                        coupon_sheet.cell(row=row_idx, column=6,
+                                          value=row['used_at'].strftime("%Y-%m-%d %H:%M:%S") if row['used_at'] else "")
+                        coupon_sheet.cell(row=row_idx, column=7, value=row['order_number'] or "")
+                    self._auto_adjust_columns(coupon_sheet)
+
+            # ==================== 6. 积分变动明细（Sheet3） ====================
+            points_sheet = wb.create_sheet(title="积分变动明细")
+            points_headers = ["日志ID", "用户ID", "用户姓名", "积分类型", "变动金额(元)", "变动后余额(元)", "变动类型",
+                              "原因", "关联订单", "创建时间"]
+            self._write_excel_header(points_sheet, points_headers)
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    # 合并 points_log 和 account_flow（company_points）
+                    cur.execute("""
+                        SELECT pl.id, pl.user_id, u.name as user_name, pl.type as points_type,
+                               pl.change_amount, pl.balance_after,
+                               CASE WHEN pl.change_amount > 0 THEN '收入' ELSE '支出' END as flow_type,
+                               pl.reason, pl.related_order, pl.created_at
+                        FROM points_log pl
+                        JOIN users u ON pl.user_id = u.id
+                        WHERE DATE(pl.created_at) BETWEEN %s AND %s
+                        UNION ALL
+                        SELECT af.id, af.related_user, u.name, 'company' as points_type,
+                               af.change_amount, af.balance_after,
+                               CASE WHEN af.change_amount > 0 THEN '收入' ELSE '支出' END,
+                               af.remark, NULL, af.created_at
+                        FROM account_flow af
+                        LEFT JOIN users u ON af.related_user = u.id
+                        WHERE af.account_type = 'company_points' AND DATE(af.created_at) BETWEEN %s AND %s
+                        ORDER BY created_at DESC
+                    """, (start_date, end_date, start_date, end_date))
+                    rows = cur.fetchall()
+                    for row_idx, row in enumerate(rows, 2):
+                        points_sheet.cell(row=row_idx, column=1, value=row['id'])
+                        points_sheet.cell(row=row_idx, column=2, value=row['user_id'])
+                        points_sheet.cell(row=row_idx, column=3, value=row['user_name'])
+                        points_sheet.cell(row=row_idx, column=4, value=row['points_type'])
+                        points_sheet.cell(row=row_idx, column=5, value=float(row['change_amount']))
+                        points_sheet.cell(row=row_idx, column=6, value=float(row['balance_after'] or 0))
+                        points_sheet.cell(row=row_idx, column=7, value=row['flow_type'])
+                        points_sheet.cell(row=row_idx, column=8, value=row['reason'] or row['remark'] or "")
+                        points_sheet.cell(row=row_idx, column=9, value=row['related_order'] or "")
+                        points_sheet.cell(row=row_idx, column=10,
+                                          value=row['created_at'].strftime("%Y-%m-%d %H:%M:%S") if row[
+                                              'created_at'] else "")
+                    self._auto_adjust_columns(points_sheet)
+
+        # ==================== 7. 月报表（Sheet4） ====================
+        monthly_sheet = wb.create_sheet(title="月报表")
+        # 月报表表头与日报表类似，但汇总按月
+        monthly_headers = [
+            "月份", "累计订单总数", "累计已完成订单数", "累计原始总金额(元)", "累计实收总金额(元)",
+            "累计积分抵扣总额(元)", "累计优惠券抵扣总额(元)", "累计优惠券使用张数", "累计用户积分净变动(元)",
+            "累计商户积分净变动(元)", "累计平台积分池净变动(元)"
+        ]
+        for pool_type in pool_types:
+            monthly_headers.append(f"{pool_type}累计净变动(元)")
+        self._write_excel_header(monthly_sheet, monthly_headers)
+
+        # 按月汇总 daily_data
+        year_month_set = set()
+        for row in daily_data:
+            y, m, _ = row[0].split('-')
+            year_month_set.add((y, m))
+        sorted_months = sorted(list(year_month_set))
+
+        row_idx = 2
+        for (y, m) in sorted_months:
+            month_str = f"{y}-{m}"
+            month_rows = [r for r in daily_data if r[0].startswith(month_str)]
+            if not month_rows:
+                continue
+
+            total_orders = sum(r[1] for r in month_rows)
+            total_completed = sum(r[2] for r in month_rows)
+            total_original = sum(r[3] for r in month_rows)
+            total_actual = sum(r[4] for r in month_rows)
+            total_points_discount = sum(r[5] for r in month_rows)
+            total_coupon_discount = sum(r[6] for r in month_rows)
+            total_coupon_used = sum(r[7] for r in month_rows)
+            total_member_net = sum(r[8] - r[9] for r in month_rows)
+            total_merchant_net = sum(r[10] - r[11] for r in month_rows)
+            total_company_net = sum(r[12] for r in month_rows)  # 注意：12是索引，实际取决于资金池列起始
+
+            # 资金池累计净变动（从索引12开始，每个池子对应一列）
+            pool_totals = []
+            start_idx = 12  # 用户积分净变动后的下一列（即第一个资金池）
+            for i in range(len(pool_types)):
+                col_idx = start_idx + i
+                pool_totals.append(sum(r[col_idx] for r in month_rows))
+
+            month_row = [
+                            f"{y}-{m}",
+                            total_orders,
+                            total_completed,
+                            total_original,
+                            total_actual,
+                            total_points_discount,
+                            total_coupon_discount,
+                            total_coupon_used,
+                            total_member_net,
+                            total_merchant_net,
+                            total_company_net
+                        ] + pool_totals
+
+            for col_idx, val in enumerate(month_row, 1):
+                cell = monthly_sheet.cell(row=row_idx, column=col_idx, value=val)
+                if isinstance(val, (int, float)):
+                    cell.number_format = '#,##0.00'
+            row_idx += 1
+
+        self._auto_adjust_columns(daily_sheet)
+        self._auto_adjust_columns(monthly_sheet)
+
+        # ==================== 8. 保存 Excel ====================
+        excel_data = BytesIO()
+        wb.save(excel_data)
+        excel_data.seek(0)
+        return excel_data.getvalue()
+
+    def _write_excel_header(self, sheet, headers):
+        """写入 Excel 表头样式"""
+        from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+        header_font = Font(bold=True, color="FFFFFF")
+        header_fill = PatternFill(start_color="2C3E50", end_color="2C3E50", fill_type="solid")
+        header_alignment = Alignment(horizontal="center", vertical="center")
+        thin_border = Border(
+            left=Side(style='thin'), right=Side(style='thin'),
+            top=Side(style='thin'), bottom=Side(style='thin')
+        )
+        for col_idx, header in enumerate(headers, 1):
+            cell = sheet.cell(row=1, column=col_idx, value=header)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = header_alignment
+            cell.border = thin_border
+
+    def _auto_adjust_columns(self, sheet):
+        """自动调整列宽"""
+        from openpyxl.utils import get_column_letter
+        for col in sheet.columns:
+            max_len = 0
+            col_letter = get_column_letter(col[0].column)
+            for cell in col:
+                try:
+                    if cell.value:
+                        max_len = max(max_len, len(str(cell.value)))
+                except:
+                    pass
+            sheet.column_dimensions[col_letter].width = min(max_len + 2, 25)
+
+    def get_system_config(self, key: str, default: Any = None) -> Any:
+        """从 system_config 表中读取配置值"""
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT config_value FROM system_config WHERE config_key = %s", (key,))
+                    row = cur.fetchone()
+                    if row:
+                        return row['config_value']
+        except Exception as e:
+            logger.error(f"读取系统配置 {key} 失败: {e}")
+        return default
+
+    def get_user_true_total_points(self, user_id: int) -> Decimal:
+        """获取用户的 true_total_points 余额"""
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                select_sql = build_dynamic_select(
+                    cur, "users",
+                    where_clause="id=%s",
+                    select_fields=["true_total_points"]
+                )
+                cur.execute(select_sql, (user_id,))
+                row = cur.fetchone()
+                if not row:
+                    raise FinanceException("用户不存在")
+                return Decimal(str(row.get('true_total_points', 0) or 0))
+
+    def exchange_coupons(self, user_id: int, count: int) -> int:
+        """
+        将用户的雨点兑换为指定数量的1元优惠券。
+        返回实际发放的优惠券数量（若余额不足或参数无效，抛出异常）。
+        """
+        if count <= 0:
+            raise FinanceException("兑换数量必须大于0")
+
+        from datetime import datetime, timedelta
+        from core.config import COUPON_VALID_DAYS
+
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                # 1. 锁定用户行，读取 true_total_points 余额
+                cur.execute(
+                    "SELECT true_total_points FROM users WHERE id = %s FOR UPDATE",
+                    (user_id,)
+                )
+                row = cur.fetchone()
+                if not row:
+                    raise FinanceException("用户不存在")
+
+                balance = Decimal(str(row['true_total_points'] or 0))
+                if balance < count:
+                    raise InsufficientBalanceException(
+                        f"user:{user_id}:true_total_points",
+                        Decimal(count),
+                        balance,
+                        f"用户雨点余额不足，当前 {balance:.4f}，需要 {count:.4f}"
+                    )
+
+                # 2. 扣除雨点余额
+                new_balance = balance - Decimal(count)
+                cur.execute(
+                    "UPDATE users SET true_total_points = %s WHERE id = %s",
+                    (new_balance, user_id)
+                )
+
+                # 3. 批量插入优惠券
+                today = datetime.now().date()
+                valid_to = today + timedelta(days=COUPON_VALID_DAYS)
+
+                coupon_records = []
+                for _ in range(count):
+                    coupon_records.append((user_id, 'user', 1.0, 'all', today, valid_to, 'unused'))
+
+                cur.executemany(
+                    """INSERT INTO coupons 
+                       (user_id, coupon_type, amount, applicable_product_type, valid_from, valid_to, status)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                    coupon_records
+                )
+
+                # 4. 记录流水（汇总一条）
+                cur.execute(
+                    """INSERT INTO account_flow 
+                       (account_type, related_user, change_amount, balance_after, flow_type, remark, created_at)
+                       VALUES (%s, %s, %s, %s, %s, %s, NOW())""",
+                    ('true_total_points', user_id, -count, new_balance, 'expense',
+                     f"兑换{count}张1元优惠券")
+                )
+
+                conn.commit()
+                return count
+
+    def batch_exchange_coupons(self) -> Dict[str, Any]:
+        """
+        批量将所有有雨点的用户雨点兑换为1元优惠券。
+        返回统计结果。
+        """
+        from core.config import COUPON_VALID_DAYS
+        from datetime import datetime, timedelta
+
+        # 获取平台兑换上限
+        max_count_str = self.get_system_config('coupon_exchange_max_count', default='10')
+        try:
+            max_count = int(max_count_str)
+        except (TypeError, ValueError):
+            max_count = 10
+
+        # 获取所有 true_total_points > 0 的用户
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id FROM users WHERE true_total_points > 0")
+                rows = cur.fetchall()
+                user_ids = [row['id'] for row in rows]
+
+        if not user_ids:
+            return {
+                'success_count': 0,
+                'total_users': 0,
+                'failed_users': [],
+                'total_coupons_issued': 0,
+                'message': '没有符合条件的用户'
+            }
+
+        success_count = 0
+        failed_users = []
+        total_coupons_issued = 0
+
+        # 分批处理，避免单次事务过长
+        batch_size = 100
+        for i in range(0, len(user_ids), batch_size):
+            batch = user_ids[i:i + batch_size]
+            for user_id in batch:
+                try:
+                    # 获取用户雨点余额
+                    balance = self.get_user_true_total_points(user_id)
+                    if balance <= 0:
+                        # 余额为0，跳过但不记为失败
+                        continue
+
+                    # 计算可兑换张数（向下取整，且不超过上限）
+                    count = int(balance)
+                    if count > max_count:
+                        count = max_count
+
+                    if count <= 0:
+                        continue
+
+                    # 调用已有兑换方法
+                    actual = self.exchange_coupons(user_id, count)
+                    success_count += 1
+                    total_coupons_issued += actual
+
+                except Exception as e:
+                    logger.error(f"批量兑换失败 - 用户{user_id}: {e}")
+                    failed_users.append({'user_id': user_id, 'reason': str(e)})
+
+            # 每批提交后休息一下，避免数据库压力（可选）
+            import time
+            time.sleep(0.1)
+
+        return {
+            'success_count': success_count,
+            'total_users': len(user_ids),
+            'failed_users': failed_users,
+            'total_coupons_issued': total_coupons_issued,
+            'message': f'批量兑换完成，成功{success_count}人，失败{len(failed_users)}人，共发放{total_coupons_issued}张优惠券'
+        }
 
 
 # ==================== 订单系统财务功能（来自 order/finance.py） ====================
