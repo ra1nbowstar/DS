@@ -398,7 +398,7 @@ class OrderManager:
                         user_id, merchant_id, order_number, final_amount, total, init_status, has_vip,
                         consignee_name, consignee_phone,
                         province, city, district, shipping_address, delivery_way,
-                        datetime.now() + timedelta(days=7),
+                        datetime.now() + timedelta(days=3),
                         specifications,
                         expire_at,
                         points_to_use or Decimal('0'),

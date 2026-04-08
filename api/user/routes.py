@@ -1277,18 +1277,17 @@ async def wechat_login(request: Request):
         raise HTTPException(status_code=400, detail="缺少参数")
 
     try:
-        # 调用微信接口，通过 code 换取 openid、session_key（可选 unionid）
+        # 调用微信接口，通过 code 换取 openid（及服务端用的 session_key，可选 unionid）
         result = WechatService.get_openid_by_code(code)
-        # 支持返回 (openid, session_key) 或 (openid, session_key, unionid)
+        # session_key 仅用于服务端解密等场景，禁止写入响应或日志（微信安全规范）
         if isinstance(result, (list, tuple)):
             if len(result) >= 2:
-                openid, session_key = result[0], result[1]
+                openid, _ = result[0], result[1]
             else:
-                openid, session_key = result, ""
+                openid = result[0] if len(result) >= 1 else ""
             unionid = result[2] if len(result) >= 3 else ""
         else:
             openid = result
-            session_key = ""
             unionid = ""
 
         # 检查用户是否已注册
@@ -1310,14 +1309,13 @@ async def wechat_login(request: Request):
 
         logger.info(f"微信登录成功 - 用户ID: {user_id}, Token: {token[:20]}..., Token长度: {len(token)}, openid={openid}")
 
-        # 返回给前端额外的微信凭证，方便前端保存 openid/session_key/unionid
+        # 返回业务 token 与 openid/unionid；切勿下发 session_key
         return {
             "uid": user_id,
             "token": token,
             "level": level,
             "is_new": is_new_user,
             "openid": openid,
-            "session_key": session_key,
             "unionid": unionid or ""
         }
 

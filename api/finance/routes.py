@@ -12,7 +12,12 @@ from core.table_access import build_dynamic_select
 from database_setup import DatabaseManager
 from services.finance_service import FinanceService
 from core.exceptions import FinanceException, OrderException, InsufficientBalanceException
-from core.config import PLATFORM_MERCHANT_ID, MEMBER_PRODUCT_PRICE, MAX_TEAM_LAYER
+from core.config import (
+    PLATFORM_MERCHANT_ID,
+    MEMBER_PRODUCT_PRICE,
+    MAX_TEAM_LAYER,
+    COUPON_VALID_DAYS,
+)
 from models.schemas.finance import (
     ResponseModel, UserCreateRequest, ProductCreateRequest, OrderRequest,
     WithdrawalRequest, WithdrawalAuditRequest, RewardAuditRequest,
@@ -644,6 +649,12 @@ async def distribute_coupon(
     ),
     coupon_type: str = Query('user', pattern=r'^(user|merchant)$', description="优惠券类型"),
     applicable_product_type: str = Query('all', pattern=r'^(all|normal_only|member_only)$', description="适用商品范围：all=不限制，normal_only=仅普通商品，member_only=仅会员商品"),
+    valid_days: int = Query(
+        COUPON_VALID_DAYS,
+        ge=0,
+        le=365,
+        description="从发放日起有效天数；默认30。测「即将过期」可填 2（约 3 天内出现在即将过期列表）；0=仅当日有效（次日即可被过期结算任务处理）",
+    ),
     service: FinanceService = Depends(get_finance_service)
 ):
     """为指定用户发放 n 张 1 元优惠券，按张扣除 true_total_points（每张 1:1）。查询参数 amount 表示张数。"""
@@ -656,17 +667,19 @@ async def distribute_coupon(
             n,
             coupon_type,
             applicable_product_type,
+            valid_days,
         )
         total = float(n)
         return ResponseModel(
             success=True,
-            message=f"已发放 {n} 张 1 元优惠券（已扣除 true_total_points ¥{total:.4f}）",
+            message=f"已发放 {n} 张 1 元优惠券（已扣除 true_total_points ¥{total:.4f}，有效天数 {valid_days}）",
             data={
                 "coupon_ids": coupon_ids,
                 "count": n,
                 "amount_per_coupon": 1.0,
                 "total_amount": total,
                 "applicable_product_type": applicable_product_type,
+                "valid_days": valid_days,
             },
         )
     except FinanceException as e:

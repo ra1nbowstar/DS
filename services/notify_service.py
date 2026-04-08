@@ -19,12 +19,28 @@ from core.logging import get_logger
 from core.database import get_conn
 from core.config import POINTS_DISCOUNT_RATE
 from services.finance_service import parse_pending_coupon_ids, parse_offline_coupon_ids, max_coupon_total_yuan
-
+from services.wechat_api import get_access_token as _wechat_stable_access_tokenfrom cryptography import x509
+from cryptography.hazmat.backends import default_backend
 # 给全局变量加类型标注（仅静态检查用）
 wxpay: WeChatPay | None
 settings: Settings
 
 logger = get_logger(__name__)
+
+def _load_cert_serial_no(cert_path: str) -> str:
+    try:
+        path = Path(cert_path)
+        if not path.exists():
+            raise FileNotFoundError(f"微信支付证书文件不存在: {path}")
+        with path.open("rb") as f:
+            cert = x509.load_pem_x509_certificate(f.read(), backend=default_backend())
+        serial = format(cert.serial_number, "x").upper()
+        logger.info(f"[WeChat] loaded merchant cert serial_no from {path}: {serial}")
+        return serial
+    except Exception as exc:
+        logger.warning(f"[WeChat] unable to load cert serial_no: {exc}")
+        return ""
+
 
 # ----------- 全局 wxpay 实例 ----------
 if not settings.wx_mock_mode_bool:  # ✅ 修改为布尔属性
@@ -38,12 +54,19 @@ if not settings.wx_mock_mode_bool:  # ✅ 修改为布尔属性
     if settings.WECHAT_PAY_PUBLIC_KEY_PATH and Path(settings.WECHAT_PAY_PUBLIC_KEY_PATH).exists():
         public_key_str = Path(settings.WECHAT_PAY_PUBLIC_KEY_PATH).read_text(encoding="utf-8")
 
+    cert_serial_no = settings.WECHAT_CERT_SERIAL_NO
+    if not cert_serial_no and settings.WECHAT_PAY_API_CERT_PATH:
+        cert_serial_no = _load_cert_serial_no(settings.WECHAT_PAY_API_CERT_PATH)
+
+    if not cert_serial_no:
+        raise RuntimeError("微信支付证书序列号未配置或读取失败，请检查 WECHAT_CERT_SERIAL_NO 和 WECHAT_PAY_API_CERT_PATH")
+
     # 初始化微信支付客户端
     wxpay = WeChatPay(
         wechatpay_type=WeChatPayType.MINIPROG,
         mchid=settings.WECHAT_PAY_MCH_ID,
         private_key=_private_key,
-        cert_serial_no=settings.WECHAT_CERT_SERIAL_NO,
+        cert_serial_no=cert_serial_no,
         apiv3_key=settings.WECHAT_PAY_API_V3_KEY,
         appid=settings.WECHAT_APP_ID,
         public_key=public_key_str,  # 传入字符串，不是对象
@@ -121,19 +144,9 @@ async def _notify_template(openid: str, order_no: str, amount: Decimal):
         logger.info(f"[WeChat] 模板消息发送成功: {r.json()}")
 
 
-# 4. 获取公众号/小程序 access_token（缓存 7000s）
+# 4. 与 wechat_api 共用稳定版 access_token，避免与其它模块各拉各的 token 触发 40001
 async def _get_access_token() -> str:
-    # 简单内存缓存，生产环境可换 Redis
-    import time
-    now = int(time.time())
-    if not hasattr(_get_access_token, "_cache") or now - _get_access_token._cache[1] > 7000:
-        url = f"https://api.weixin.qq.com/cgi-bin/token?grant_type=client_credential&appid={settings.WECHAT_APP_ID}&secret={settings.WECHAT_APP_SECRET}"
-        async with httpx.AsyncClient() as client:
-            r = await client.get(url)
-            r.raise_for_status()
-            token = r.json()["access_token"]
-            _get_access_token._cache = (token, now)
-    return _get_access_token._cache[0]
+    return await _wechat_stable_access_token()
 
 
 # 5. 对外唯一入口：微信到账通知

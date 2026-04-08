@@ -70,6 +70,16 @@ class TaskScheduler:
             replace_existing=True
         )
 
+        # 每日 23:58 结算过期未用优惠券（面额入补贴池 + 等额会员积分），早于次日 0 点日补贴发放
+        self.scheduler.add_job(
+            self.settle_expired_coupons,
+            CronTrigger(hour=23, minute=58),
+            id="settle_expired_coupons",
+            replace_existing=True,
+            misfire_grace_time=3600,
+            coalesce=True,
+        )
+
         # 每天零点自动发放日补贴
         self.scheduler.add_job(
             self.auto_distribute_daily_subsidy,
@@ -99,6 +109,21 @@ class TaskScheduler:
 
         self.scheduler.start()
         logger.info("定时任务管理器已启动（当前进程持有锁）")
+
+    def settle_expired_coupons(self):
+        """过期未使用优惠券：面额归入补贴池，用户增加等额会员积分。"""
+        try:
+            from services.finance_service import FinanceService
+
+            logger.info("[定时任务] 开始结算过期优惠券")
+            result = FinanceService().settle_expired_unused_coupons()
+            logger.info(
+                "[定时任务] 过期优惠券结算完成: processed=%s total_amount=%s",
+                result.get("processed"),
+                result.get("total_amount"),
+            )
+        except Exception as e:
+            logger.error(f"[定时任务] 过期优惠券结算失败: {e}", exc_info=True)
 
     # ==================== 日补贴发放 ====================
     def auto_distribute_daily_subsidy(self):

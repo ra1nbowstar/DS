@@ -20,9 +20,26 @@ import xmltodict
 from services.wechat_api import get_wxacode_unlimit  # ✅ 新增导入
 import base64
 from services.wechat_api import get_wxacode
+from cryptography import x509
+from cryptography.hazmat.backends import default_backend
 # used for plain QR code generation (added to pyproject)
 
 logger = get_logger(__name__)
+
+def _load_cert_serial_no(cert_path: str) -> str:
+    try:
+        path = Path(cert_path)
+        if not path.exists():
+            raise FileNotFoundError(f"微信支付证书文件不存在: {path}")
+        with path.open("rb") as f:
+            cert = x509.load_pem_x509_certificate(f.read(), backend=default_backend())
+        serial = format(cert.serial_number, "x").upper()
+        logger.info(f"[WeChat] loaded merchant cert serial_no from {path}: {serial}")
+        return serial
+    except Exception as exc:
+        logger.warning(f"[WeChat] unable to load cert serial_no: {exc}")
+        return ""
+
 
 # -------------- 运行时 wxpay 初始化 --------------
 if not settings.wx_mock_mode_bool:  # ✅ 修改为布尔属性
@@ -41,11 +58,18 @@ if not settings.wx_mock_mode_bool:  # ✅ 修改为布尔属性
         else:
             logger.warning(f"WeChat public key file not found: {pub_path}")
 
+    cert_serial_no = settings.WECHAT_CERT_SERIAL_NO
+    if not cert_serial_no and settings.WECHAT_PAY_API_CERT_PATH:
+        cert_serial_no = _load_cert_serial_no(settings.WECHAT_PAY_API_CERT_PATH)
+
+    if not cert_serial_no:
+        raise RuntimeError("微信支付证书序列号未配置或读取失败，请检查 WECHAT_CERT_SERIAL_NO 和 WECHAT_PAY_API_CERT_PATH")
+
     wxpay: WeChatPay = WeChatPay(
         wechatpay_type=WeChatPayType.MINIPROG,
         mchid=settings.WECHAT_PAY_MCH_ID,
         private_key=private_key,
-        cert_serial_no=settings.WECHAT_CERT_SERIAL_NO,
+        cert_serial_no=cert_serial_no,
         apiv3_key=settings.WECHAT_PAY_API_V3_KEY,
         appid=settings.WECHAT_APP_ID,
         public_key=public_key,
@@ -550,6 +574,27 @@ class OfflineService:
                 # ✅ 统一基数 = 实付金额 + 优惠券金额
                 distribution_base = amount + coupon_discount
 
+                # 与线上 settle_order 一致：线下扫码无商品行，整笔基数视为「普通商品」分摊基数
+                normal_paid = distribution_base
+
+                has_referrer = False
+                referrer_id = None
+                if user_id is not None:
+                    cur.execute(
+                        "SELECT referrer_id FROM user_referrals WHERE user_id = %s",
+                        (user_id,),
+                    )
+                    ref_row = cur.fetchone()
+                    if ref_row and ref_row.get("referrer_id"):
+                        cur.execute(
+                            "SELECT status FROM users WHERE id = %s",
+                            (ref_row["referrer_id"],),
+                        )
+                        status_row = cur.fetchone()
+                        if status_row and status_row.get("status") == 0:
+                            has_referrer = True
+                            referrer_id = ref_row["referrer_id"]
+
                 merchant_amount = distribution_base * merchant_ratio  # 商家应得总额（含优惠券）
 
                 # 平台收入池记录完整收入
@@ -562,15 +607,28 @@ class OfflineService:
                 for pool_type, ratio in allocs.items():
                     if pool_type == 'merchant_balance' or ratio <= 0:
                         continue
-                    alloc_amount = distribution_base * ratio
+                    alloc_amount = (distribution_base * ratio).quantize(Decimal("0.000001"))
                     finance._add_pool_balance(
                         cur, 'platform_revenue_pool', -alloc_amount,
                         f"线下订单分配: {order_no} -> {pool_type}", merchant_id
                     )
-                    finance._add_pool_balance(
-                        cur, pool_type, alloc_amount,
-                        f"线下订单收入: {order_no}", merchant_id
-                    )
+                    if pool_type == 'fund_pool' and has_referrer and normal_paid > 0:
+                        referral_amount = (normal_paid * ratio).quantize(Decimal("0.000001"))
+                        finance._grant_referral_points(cur, referrer_id, referral_amount, order_no)
+                        fund_pool_amount = alloc_amount - referral_amount
+                        if fund_pool_amount > 0:
+                            finance._add_pool_balance(
+                                cur,
+                                pool_type,
+                                fund_pool_amount,
+                                f"线下订单#{order_no} fund_pool+{int(ratio * 100)}% (剩余部分)",
+                                user_id,
+                            )
+                    else:
+                        finance._add_pool_balance(
+                            cur, pool_type, alloc_amount,
+                            f"线下订单收入: {order_no}", merchant_id
+                        )
 
                 # 3. 用户积分发放（实付部分）
                 if amount > 0 and user_id is not None:

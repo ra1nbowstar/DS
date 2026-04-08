@@ -16,7 +16,7 @@ from core.config import (
     AllocationKey, ALLOCATIONS, MAX_POINTS_VALUE, TAX_RATE,
     POINTS_DISCOUNT_RATE, MEMBER_PRODUCT_PRICE, COUPON_VALID_DAYS,
     PLATFORM_MERCHANT_ID, MAX_PURCHASE_PER_DAY, MAX_TEAM_LAYER,
-    LOG_FILE
+    LOG_FILE, CouponStatus,
 )
 from core.database import get_conn
 from core.db_adapter import PyMySQLAdapter
@@ -2571,11 +2571,71 @@ class FinanceService:
                     "created_at": c['created_at'].strftime("%Y-%m-%d %H:%M:%S")
                 } for c in coupons]
 
+    def settle_expired_unused_coupons(self) -> Dict[str, Any]:
+        """
+        已过期且未使用的优惠券：面额计入补贴池 subsidy_pool，并向持有人增加等额 member_points，
+        券状态改为 expired。与发放时扣除的 true_total_points 无关（按产品规则仅补贴池+会员积分补偿）。
+        """
+        today = datetime.now().date()
+        processed = 0
+        total_amount = Decimal('0')
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, user_id, amount FROM coupons
+                    WHERE status = %s AND valid_to < %s
+                    ORDER BY id
+                    """,
+                    (CouponStatus.UNUSED, today),
+                )
+                rows = cur.fetchall() or []
+                for r in rows:
+                    cid = int(r['id'])
+                    uid = int(r['user_id'])
+                    amt = Decimal(str(r['amount'] or 0))
+                    cur.execute(
+                        """
+                        UPDATE coupons SET status = %s
+                        WHERE id = %s AND status = %s AND valid_to < %s
+                        """,
+                        (CouponStatus.EXPIRED, cid, CouponStatus.UNUSED, today),
+                    )
+                    if cur.rowcount == 0:
+                        continue
+                    if amt > 0:
+                        self._add_pool_balance(
+                            cur,
+                            'subsidy_pool',
+                            amt,
+                            f"优惠券#{cid}过期未使用，面额归入补贴池",
+                            related_user=uid,
+                        )
+                        cur.execute(
+                            "UPDATE users SET member_points = COALESCE(member_points, 0) + %s WHERE id = %s",
+                            (amt, uid),
+                        )
+                        cur.execute("SELECT member_points FROM users WHERE id = %s", (uid,))
+                        bal_row = cur.fetchone()
+                        new_bal = Decimal(str(bal_row['member_points'] or 0))
+                        cur.execute(
+                            """INSERT INTO points_log (user_id, change_amount, balance_after, type, reason, related_order, created_at)
+                               VALUES (%s, %s, %s, 'member', %s, NULL, NOW())""",
+                            (uid, amt, new_bal, f"优惠券#{cid}过期补偿积分（面额¥{amt}）"),
+                        )
+                        total_amount += amt
+                    processed += 1
+                conn.commit()
+        logger.info(
+            "过期优惠券结算: %s 张, 合计面额 %s 已入补贴池并发放等额会员积分",
+            processed,
+            total_amount,
+        )
+        return {"processed": processed, "total_amount": float(total_amount)}
 
-
-            # ----------------------------------
-            # 供线下模块调用的快捷接口
-            # ----------------------------------
+    # ----------------------------------
+    # 供线下模块调用的快捷接口
+    # ----------------------------------
 
     def list_available(self, user_id: int, amount: int = 0) -> List[Dict[str, Any]]:
         """

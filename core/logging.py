@@ -4,6 +4,7 @@
 日志文件存储位置：logs/api.log
 """
 import logging
+import os
 import sys
 from pathlib import Path
 from core.config import LOG_FILE, LOG_DIR
@@ -81,4 +82,8 @@ def get_logger(name: str) -> logging.Logger:
 
 # 在模块导入时自动配置日志（仅输出到文件）
 # 如果需要同时输出到控制台，可以在 main.py 中调用 setup_logging(log_to_console=True)
-setup_logging(log_to_file=True, log_to_console=False)
+# DS_LOG_CONSOLE_ONLY=1：不写 logs/api.log，仅 stdout（避免无写权限的一行脚本失败）
+if os.environ.get("DS_LOG_CONSOLE_ONLY") == "1":
+    setup_logging(log_to_file=False, log_to_console=True)
+else:
+    setup_logging(log_to_file=True, log_to_console=False)

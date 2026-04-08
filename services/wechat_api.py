@@ -1,4 +1,5 @@
 # services/wechat_api.py
+import asyncio
 import json
 import time
 import threading
@@ -8,12 +9,19 @@ from core.logging import get_logger  # ✅ 新增：导入 logger
 
 logger = get_logger(__name__)        # ✅ 新增：初始化 logger
 
+_access_token_lock = asyncio.Lock()
+
 _WXA_ENV_ALLOWED = frozenset({"release", "trial", "develop"})
 
 
 def _normalize_wxa_env_version() -> str:
     v = (getattr(settings, "WECHAT_WXA_ENV_VERSION", None) or "release").strip().lower()
     return v if v in _WXA_ENV_ALLOWED else "release"
+
+
+def _looks_like_stale_access_token(msg: str) -> bool:
+    t = msg.lower()
+    return "invalid credential" in t or "not latest" in t
 
 
 def _wxacode_response_to_png(resp: httpx.Response, context: str) -> bytes:
@@ -40,30 +48,70 @@ def _wxacode_response_to_png(resp: httpx.Response, context: str) -> bytes:
     raise ValueError("微信返回非图片数据，请检查 access_token、路径与 env_version 配置")
 
 
-async def get_access_token() -> str:
-    """简易 access_token 缓存，7000s"""
-    import time
+async def get_access_token(*, force_refresh: bool = False) -> str:
+    """
+    稳定版小程序 access_token（POST cgi-bin/stable_token）。
+    与普通 token 接口相比，多实例并发刷新时不易出现 40001「not latest」。
+    """
     now = int(time.time())
-    if not hasattr(get_access_token, "_cache") or now - get_access_token._cache[1] > 7000:
-        url = ("https://api.weixin.qq.com/cgi-bin/token"
-               "?grant_type=client_credential"
-               f"&appid={settings.WECHAT_APP_ID}"
-               f"&secret={settings.WECHAT_APP_SECRET}")
+    cache = getattr(get_access_token, "_cache", None)
+    if (
+        not force_refresh
+        and cache
+        and now - cache[1] < cache[2]
+    ):
+        return cache[0]
+
+    async with _access_token_lock:
+        now = int(time.time())
+        cache = getattr(get_access_token, "_cache", None)
+        if (
+            not force_refresh
+            and cache
+            and now - cache[1] < cache[2]
+        ):
+            return cache[0]
+
+        url = "https://api.weixin.qq.com/cgi-bin/stable_token"
+        body = {
+            "grant_type": "client_credential",
+            "appid": settings.WECHAT_APP_ID,
+            "secret": settings.WECHAT_APP_SECRET,
+            "force_refresh": bool(force_refresh),
+        }
         async with httpx.AsyncClient() as cli:
-            ret = await cli.get(url)
+            ret = await cli.post(url, json=body, timeout=15)
             ret.raise_for_status()
-            get_access_token._cache = (ret.json()["access_token"], now)
-    return get_access_token._cache[0]
+            data = ret.json()
+        if data.get("errcode"):
+            logger.error("stable_token 失败: %s", data)
+            raise ValueError(data.get("errmsg") or str(data))
+        token = data["access_token"]
+        expires_in = int(data.get("expires_in") or 7200)
+        ttl = max(120, min(7000, expires_in - 300))
+        get_access_token._cache = (token, now, ttl)
+        return token
 
 async def get_wxacode(path: str, scene: str = "", width: int = 280) -> bytes:
     """获取临时小程序码二进制"""
-    token = await get_access_token()
-    url = f"https://api.weixin.qq.com/wxa/getwxacode?access_token={token}"
-    body = {"path": path, "scene": scene, "width": width}
-    async with httpx.AsyncClient() as cli:
-        r = await cli.post(url, json=body)
-        r.raise_for_status()
-        return _wxacode_response_to_png(r, "getwxacode")
+    last_err: BaseException | None = None
+    for attempt in range(2):
+        token = await get_access_token(force_refresh=(attempt > 0))
+        url = f"https://api.weixin.qq.com/wxa/getwxacode?access_token={token}"
+        body = {"path": path, "scene": scene, "width": width}
+        try:
+            async with httpx.AsyncClient() as cli:
+                r = await cli.post(url, json=body)
+                r.raise_for_status()
+                return _wxacode_response_to_png(r, "getwxacode")
+        except ValueError as e:
+            last_err = e
+            if attempt == 0 and _looks_like_stale_access_token(str(e)):
+                logger.warning("getwxacode token 失效，将强制刷新后重试: %s", e)
+                continue
+            raise
+    assert last_err is not None
+    raise last_err
 
 # ==================== 永久小程序码接口 ====================
 async def get_wxacode_unlimit(scene: str, page: str, width: int = 280) -> bytes:
@@ -74,8 +122,6 @@ async def get_wxacode_unlimit(scene: str, page: str, width: int = 280) -> bytes:
     :param width: 二维码宽度
     :return: 图片二进制数据
     """
-    token = await get_access_token()
-    url = f"https://api.weixin.qq.com/wxa/getwxacodeunlimit?access_token={token}"
     env_ver = _normalize_wxa_env_version()
     logger.debug(
         "getwxacodeunlimit appid=%s env_version=%s page=%s scene=%s",
@@ -91,10 +137,23 @@ async def get_wxacode_unlimit(scene: str, page: str, width: int = 280) -> bytes:
         "check_path": False,          # 不校验页面是否存在（便于未发布页面）
         "env_version": env_ver,
     }
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(url, json=payload, timeout=10)
-        resp.raise_for_status()
-        return _wxacode_response_to_png(resp, "getwxacodeunlimit")
+    last_err: BaseException | None = None
+    for attempt in range(2):
+        token = await get_access_token(force_refresh=(attempt > 0))
+        url = f"https://api.weixin.qq.com/wxa/getwxacodeunlimit?access_token={token}"
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(url, json=payload, timeout=10)
+                resp.raise_for_status()
+                return _wxacode_response_to_png(resp, "getwxacodeunlimit")
+        except ValueError as e:
+            last_err = e
+            if attempt == 0 and _looks_like_stale_access_token(str(e)):
+                logger.warning("getwxacodeunlimit token 失效，将强制刷新后重试: %s", e)
+                continue
+            raise
+    assert last_err is not None
+    raise last_err
 
 
 # ---------- URL Link（网页拉起小程序） ----------
@@ -108,8 +167,6 @@ async def generate_miniprogram_urllink(*, path: str, query: str = "") -> str:
     调用 wxa/generate_urllink，返回 https 的 url_link。
     path 如 pages/index/index；query 如 a=1&b=2（不要带 ?）。
     """
-    token = await get_access_token()
-    api_url = f"https://api.weixin.qq.com/wxa/generate_urllink?access_token={token}"
     env_ver = _normalize_wxa_env_version()
     body: dict = {
         "path": path,
@@ -118,18 +175,26 @@ async def generate_miniprogram_urllink(*, path: str, query: str = "") -> str:
     }
     if query:
         body["query"] = query
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(api_url, json=body, timeout=15)
-        resp.raise_for_status()
-    data = resp.json()
-    if data.get("errcode"):
-        logger.error("generate_urllink 失败: %s", data)
-        raise ValueError(data.get("errmsg") or str(data))
-    link = data.get("url_link")
-    if not link:
-        logger.error("generate_urllink 无 url_link: %s", data)
-        raise ValueError("微信未返回 url_link")
-    return link
+    for attempt in range(2):
+        token = await get_access_token(force_refresh=(attempt > 0))
+        api_url = f"https://api.weixin.qq.com/wxa/generate_urllink?access_token={token}"
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(api_url, json=body, timeout=15)
+            resp.raise_for_status()
+        data = resp.json()
+        errcode = int(data.get("errcode") or 0)
+        if errcode:
+            logger.error("generate_urllink 失败: %s", data)
+            if attempt == 0 and errcode == 40001:
+                logger.warning("generate_urllink 40001，将强制刷新 stable_token 后重试")
+                continue
+            raise ValueError(data.get("errmsg") or str(data))
+        link = data.get("url_link")
+        if not link:
+            logger.error("generate_urllink 无 url_link: %s", data)
+            raise ValueError("微信未返回 url_link")
+        return link
+    raise RuntimeError("generate_urllink: 重试后仍失败")
 
 
 async def get_or_create_permanent_pay_urllink(merchant_user_id: int) -> str:
@@ -161,25 +226,31 @@ async def generate_miniprogram_openlink(*, path: str, query: str = "") -> str:
     调用 wxa/generatescheme，返回 weixin://dl/business/?t=... 的 openlink。
     文档说明：可在用户打开 H5 时立即 location.href / replace 调用，适合微信内置浏览器。
     """
-    token = await get_access_token()
-    api_url = f"https://api.weixin.qq.com/wxa/generatescheme?access_token={token}"
     env_ver = _normalize_wxa_env_version()
     jump_wxa: dict = {"path": path, "env_version": env_ver}
     if query:
         jump_wxa["query"] = query
     body: dict = {"jump_wxa": jump_wxa, "is_expire": False}
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(api_url, json=body, timeout=15)
-        resp.raise_for_status()
-    data = resp.json()
-    if data.get("errcode"):
-        logger.error("generatescheme 失败: %s", data)
-        raise ValueError(data.get("errmsg") or str(data))
-    openlink = data.get("openlink")
-    if not openlink:
-        logger.error("generatescheme 无 openlink: %s", data)
-        raise ValueError("微信未返回 openlink")
-    return openlink
+    for attempt in range(2):
+        token = await get_access_token(force_refresh=(attempt > 0))
+        api_url = f"https://api.weixin.qq.com/wxa/generatescheme?access_token={token}"
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(api_url, json=body, timeout=15)
+            resp.raise_for_status()
+        data = resp.json()
+        errcode = int(data.get("errcode") or 0)
+        if errcode:
+            logger.error("generatescheme 失败: %s", data)
+            if attempt == 0 and errcode == 40001:
+                logger.warning("generatescheme 40001，将强制刷新 stable_token 后重试")
+                continue
+            raise ValueError(data.get("errmsg") or str(data))
+        openlink = data.get("openlink")
+        if not openlink:
+            logger.error("generatescheme 无 openlink: %s", data)
+            raise ValueError("微信未返回 openlink")
+        return openlink
+    raise RuntimeError("generatescheme: 重试后仍失败")
 
 
 async def get_or_create_permanent_pay_openlink(merchant_user_id: int) -> str:

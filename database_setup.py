@@ -160,7 +160,7 @@ class DatabaseManager:
                     shipping_address TEXT,
                     pay_way ENUM('wechat') DEFAULT 'wechat',
                     refund_reason TEXT,
-                    auto_recv_time DATETIME NULL COMMENT '7 天后自动收货',
+                    auto_recv_time DATETIME NULL COMMENT '3 天后自动收货',
                     tracking_number VARCHAR(64) NULL COMMENT '快递单号',
                     transaction_id VARCHAR(64) DEFAULT NULL COMMENT '微信/支付宝交易号',
                     pay_time DATETIME NULL COMMENT '支付成功时间',

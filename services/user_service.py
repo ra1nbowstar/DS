@@ -422,7 +422,9 @@ class UserService:
 
                 if status != 'all':
                     if status == 'expired':
-                        where.append("status = 'unused' AND valid_to < CURDATE()")
+                        where.append(
+                            "(status = 'expired' OR (status = 'unused' AND valid_to < CURDATE()))"
+                        )
                     else:
                         where.append("status = %s")
                         params.append(status)
