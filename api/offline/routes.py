@@ -147,8 +147,11 @@ async def create_offline_order(
             (Decimal(str(req.amount)) * 100).quantize(Decimal('1'), rounding=ROUND_HALF_UP)
         )
 
+        # 检查金额范围
         if amount_fen <= 0:
             raise ValueError("订单金额必须大于 0 元")
+        if amount_fen > 1000000000:  # 1000万分 = 10万元上限
+            raise ValueError("订单金额不能超过 10 万元")
 
         # ✅ 关键修复：传入 amount_fen（单位：分）
         result = await OfflineService.create_order(

@@ -19,7 +19,8 @@ from core.logging import get_logger
 from core.database import get_conn
 from core.config import POINTS_DISCOUNT_RATE
 from services.finance_service import parse_pending_coupon_ids, parse_offline_coupon_ids, max_coupon_total_yuan
-from services.wechat_api import get_access_token as _wechat_stable_access_tokenfrom cryptography import x509
+from services.wechat_api import get_access_token as _wechat_stable_access_token
+from cryptography import x509
 from cryptography.hazmat.backends import default_backend
 # 给全局变量加类型标注（仅静态检查用）
 wxpay: WeChatPay | None
@@ -305,6 +306,7 @@ async def _handle_online_pay_notify(order_no: str, wx_total: int, data: dict) ->
     """
     处理线上商城订单支付回调（原有逻辑提取为独立函数）
     """
+    next_status: str | None = None
     try:
         with get_conn() as conn:
             with conn.cursor(pymysql.cursors.DictCursor) as cur:
@@ -381,15 +383,19 @@ async def _handle_online_pay_notify(order_no: str, wx_total: int, data: dict) ->
                 if wx_total != db_total:
                     raise ValueError(f"金额不一致 微信{wx_total}≠系统{db_total}")
 
-                # 记录优惠券和积分抵扣金额到订单表（关键修复）
+                tid = (data.get("transaction_id") or "").strip()
+
+                # 记录优惠券和积分抵扣金额到订单表（关键修复）；写入微信 transaction_id 供发货接口使用
                 cur.execute("""
                     UPDATE orders 
                     SET coupon_discount = %s,
-                        original_amount = COALESCE(%s, total_amount)
+                        original_amount = COALESCE(%s, total_amount),
+                        transaction_id = COALESCE(NULLIF(%s, ''), transaction_id)
                     WHERE id = %s
                 """, (
                     coupon_amt,
                     order["original_amount"] or order["total_amount"],
+                    tid,
                     order["id"]
                 ))
 
@@ -431,6 +437,26 @@ async def _handle_online_pay_notify(order_no: str, wx_total: int, data: dict) ->
                 conn.commit()
 
         logger.info(f"[online-pay] 线上订单支付成功: {order_no}")
+        if next_status == "pending_recv" and order.get("delivery_way") == "pickup":
+            from services.wechat_shipping_v2_service import upload_pickup_shipping_to_wechat
+
+            tid_notify = (data.get("transaction_id") or "").strip()
+
+            async def _pickup_upload_bg():
+                try:
+                    await asyncio.to_thread(upload_pickup_shipping_to_wechat, order_no, tid_notify)
+                except Exception as ex:
+                    logger.error(
+                        "[online-pay] 自提微信发货后台任务异常 order=%s: %s",
+                        order_no,
+                        ex,
+                        exc_info=True,
+                    )
+
+            try:
+                asyncio.create_task(_pickup_upload_bg())
+            except RuntimeError:
+                upload_pickup_shipping_to_wechat(order_no, tid_notify)
         return "<xml><return_code><![CDATA[SUCCESS]]></return_code></xml>"
 
     except Exception as e:

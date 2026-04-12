@@ -6169,108 +6169,94 @@ class FinanceService:
                 else:
                     wsr_where = base_where_wsr
 
-                # ==================== 2. 查询 account_flow 数据 ====================
-                # 先查询总数
+                # ==================== 2. 双源总数（分页 total 与 summary 仍用两表合计） ====================
                 count_sql = f"SELECT COUNT(*) as total FROM account_flow af {account_where}"
                 cur.execute(count_sql, tuple(params_account_flow))
                 af_total = cur.fetchone()['total'] or 0
 
-                # 查询明细
-                offset = (page - 1) * page_size
-                detail_sql = f"""
-                    SELECT 
-                        af.id as flow_id,
-                        af.related_user as user_id,
-                        u.name as user_name,
-                        af.account_type,
-                        af.change_amount,
-                        af.balance_after,
-                        af.flow_type,
-                        af.remark,
-                        af.created_at
-                    FROM account_flow af
-                    JOIN users u ON af.related_user = u.id
-                    {account_where}
-                    ORDER BY af.created_at DESC
-                    LIMIT %s OFFSET %s
-                """
-                # 确保参数是列表，最后添加分页参数
-                af_params = list(params_account_flow) + [page_size, offset]
-                cur.execute(detail_sql, tuple(af_params))
-                # 强制转换为列表
-                af_records = list(cur.fetchall())
-
-                # ==================== 3. 查询 weekly_subsidy_records 补充数据 ====================
-                # 查询补充数据源的总数
                 count_wsr_sql = f"SELECT COUNT(*) as total FROM weekly_subsidy_records wsr {wsr_where}"
                 cur.execute(count_wsr_sql, tuple(params_wsr))
                 wsr_total = cur.fetchone()['total'] or 0
 
-                # 如果 account_flow 的记录不足一页，从 wsr 补充
-                wsr_records = []
-                if len(af_records) < page_size:
-                    # 计算在 wsr 中的偏移量
-                    wsr_offset = max(0, offset - af_total)
-                    wsr_limit = page_size - len(af_records)
-
-                    # 查询 wsr 数据
-                    wsr_sql = f"""
-                        SELECT 
-                            wsr.id as record_id,
+                # ==================== 3. UNION ALL 按时间全局排序后 LIMIT/OFFSET（修正分页与顺序） ====================
+                # 旧逻辑先 LIMIT account_flow 再“不足一页才补 wsr”，会导致：满页时永远没有 wsr、
+                # 各页 OFFSET 与合并时间序不一致（重复/遗漏）。必须在 SQL 层合并排序再分页。
+                offset = (page - 1) * page_size
+                merged_sql = f"""
+                    SELECT
+                        m.flow_id,
+                        m.user_id,
+                        m.user_name,
+                        m.account_type,
+                        m.change_amount,
+                        m.balance_after,
+                        m.flow_type,
+                        m.remark,
+                        m.sort_at AS created_at,
+                        m.wsr_points_before,
+                        m.flow_src
+                    FROM (
+                        SELECT
+                            CONCAT('af_', af.id) AS flow_id,
+                            'af' AS flow_src,
+                            af.id AS sort_pk,
+                            af.related_user AS user_id,
+                            u.name AS user_name,
+                            af.account_type,
+                            af.change_amount,
+                            af.balance_after,
+                            af.flow_type,
+                            af.remark,
+                            af.created_at AS sort_at,
+                            CAST(NULL AS DECIMAL(20, 4)) AS wsr_points_before
+                        FROM account_flow af
+                        JOIN users u ON af.related_user = u.id
+                        {account_where}
+                        UNION ALL
+                        SELECT
+                            CONCAT('wsr_', wsr.id),
+                            'wsr',
+                            wsr.id,
                             wsr.user_id,
-                            u.name as user_name,
-                            wsr.subsidy_amount as change_amount,
-                            wsr.week_start as created_at,
-                            wsr.points_deducted,
+                            u.name,
+                            'subsidy_points',
+                            wsr.subsidy_amount,
+                            u.subsidy_points,
+                            'income',
+                            NULL AS remark,
+                            CAST(wsr.week_start AS DATETIME) AS sort_at,
                             wsr.points_before
                         FROM weekly_subsidy_records wsr
                         JOIN users u ON wsr.user_id = u.id
                         {wsr_where}
-                        ORDER BY wsr.week_start DESC, wsr.id DESC
-                        LIMIT %s OFFSET %s
-                    """
-                    wsr_params = list(params_wsr) + [wsr_limit, wsr_offset]
-                    cur.execute(wsr_sql, tuple(wsr_params))
-                    wsr_raw = list(cur.fetchall())
+                    ) m
+                    ORDER BY m.sort_at DESC, m.flow_src DESC, m.sort_pk DESC
+                    LIMIT %s OFFSET %s
+                """
+                merge_params = list(params_account_flow) + list(params_wsr) + [page_size, offset]
+                cur.execute(merged_sql, tuple(merge_params))
+                all_records = list(cur.fetchall())
 
-                    # 转换格式：将 wsr 记录转换为与 account_flow 一致的格式
-                    for r in wsr_raw:
-                        # 查询该用户的当前 subsidy_points 余额
-                        cur.execute(
-                            "SELECT COALESCE(subsidy_points, 0) as balance FROM users WHERE id = %s",
-                            (r['user_id'],)
+                for record in all_records:
+                    if record.get('flow_src') == 'wsr':
+                        pb = record.get('wsr_points_before') or 0
+                        amt = record.get('change_amount') or 0
+                        record['remark'] = (
+                            f"周补贴发放（扣减积分{float(pb):.4f}分，发放点数{float(amt):.4f}点）"
                         )
-                        balance_row = cur.fetchone()
-                        current_balance = Decimal(str(balance_row['balance'] if balance_row else 0))
+                    record.pop('flow_src', None)
+                    record.pop('wsr_points_before', None)
 
-                        # 转换记录格式
-                        wsr_records.append({
-                            'flow_id': f"wsr_{r['record_id']}",  # 构造唯一ID
-                            'user_id': r['user_id'],
-                            'user_name': r['user_name'],
-                            'account_type': 'subsidy_points',
-                            'change_amount': Decimal(str(r['change_amount'] or 0)),  # 补贴金额即点数
-                            'balance_after': current_balance,
-                            'flow_type': 'income',
-                            'remark': f"周补贴发放（扣减积分{r['points_before'] or 0:.4f}分，发放点数{r['change_amount'] or 0:.4f}点）",
-                            'created_at': r['created_at']
-                        })
-
-                # ==================== 4. 合并并排序结果（确保都是列表） ====================
-                # 强制转换为列表（即使 cur.fetchall 返回 tuple）
-                all_records = list(af_records) + list(wsr_records)
-
-                # 统一 created_at 类型：将 date 转换为 datetime
+                # 统一 created_at：date 转 datetime（CAST 后一般为 datetime，保留兼容）
                 for record in all_records:
                     created_at = record['created_at']
-                    if hasattr(created_at, 'year') and hasattr(created_at, 'month') and hasattr(created_at, 'day'):
-                        # 如果是 date 类型，转换为 datetime
-                        if not hasattr(created_at, 'hour'):
-                            from datetime import datetime
-                            record['created_at'] = datetime.combine(created_at, datetime.min.time())
-
-                # 按创建时间降序排序
-                all_records.sort(key=lambda x: x['created_at'], reverse=True)
+                    if (
+                        hasattr(created_at, 'year')
+                        and hasattr(created_at, 'month')
+                        and hasattr(created_at, 'day')
+                        and not hasattr(created_at, 'hour')
+                    ):
+                        record['created_at'] = datetime.combine(created_at, datetime.min.time())
 
                 # ==================== 5. 汇总统计（双表合并） ====================
                 # account_flow 汇总

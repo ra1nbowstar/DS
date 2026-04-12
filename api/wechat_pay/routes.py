@@ -851,6 +851,26 @@ async def _handle_online_pay_success(order_no: str, transaction_id: str, amount:
 
                 conn.commit()
         logger.info(f"线上订单支付成功: {order_no}")
+        if order.get("delivery_way") == "pickup":
+            import asyncio
+
+            from services.wechat_shipping_v2_service import upload_pickup_shipping_to_wechat
+
+            async def _pickup_upload_bg():
+                try:
+                    await asyncio.to_thread(upload_pickup_shipping_to_wechat, order_no, transaction_id)
+                except Exception as ex:
+                    logger.error(
+                        "自提微信发货后台任务异常 order=%s: %s",
+                        order_no,
+                        ex,
+                        exc_info=True,
+                    )
+
+            try:
+                asyncio.create_task(_pickup_upload_bg())
+            except RuntimeError:
+                upload_pickup_shipping_to_wechat(order_no, transaction_id)
 
     except Exception as e:
         logger.error(f"线上订单支付成功处理失败: {e}", exc_info=True)

@@ -377,10 +377,12 @@ class OrderManager:
                         raise HTTPException(status_code=422, detail="必须上传收货地址或选择自提")
 
                     # ---------- 4. 订单主表 ----------
+                    user_id_str = str(user_id)
+                    uuid_len = 32 - 14 - len(user_id_str)
                     order_number = (
                             datetime.now().strftime("%Y%m%d%H%M%S") +
-                            str(user_id) +
-                            uuid.uuid4().hex[:16]
+                            user_id_str +
+                            uuid.uuid4().hex[:uuid_len]
                     )
 
                     cur.execute("""

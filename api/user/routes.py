@@ -1421,7 +1421,7 @@ def upload_avatar(
 def get_my_coupons(
     status: str = "all",
     page: int = 1,
-    page_size: int = 20,
+    page_size: int = Query(20, ge=1, le=99999),
     user_id: int = Query(..., description="用户ID")  # ← 改为必填查询参数
 ):
     """查询指定用户的优惠券（user_id从查询参数获取）"""

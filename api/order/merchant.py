@@ -148,6 +148,8 @@ class MerchantManager:
                                 """, (order_info['id'],))
                                 products = inner_cur.fetchall()
 
+                        logger.info(f"订单 {order_number} 商品名称: {[p['name'] for p in products]}")
+
                         # 清理特殊字符并拼接商品名
                         import re
                         clean_names = [re.sub(r'[\r\n\t]', '', p['name']) for p in products]
@@ -158,6 +160,8 @@ class MerchantManager:
                             item_desc = joined
                         if not item_desc:
                             item_desc = "商品"
+                        # 确保UTF8编码
+                        item_desc = item_desc.encode('utf-8').decode('utf-8')
 
                         # 物流类型映射
                         wx_logistics_type = LOGISTICS_TYPE_MAP.get(delivery_way, 1)
