@@ -284,7 +284,8 @@ async def _handle_offline_pay_notify(order_no: str, wx_total: int, data: dict) -
                     tw = await OfflineService.on_paid(
                         order_no=order_no,
                         amount=Decimal(order["paid_amount"]) / 100,  # 转为元
-                        coupon_discount=Decimal(order["amount"] - order["paid_amount"]) / 100 if offline_cids else Decimal(0)
+                        coupon_discount=Decimal(order["amount"] - order["paid_amount"]) / 100 if offline_cids else Decimal(0),
+                        transaction_id=(data.get("transaction_id") or "").strip() or None,
                     )
                     if tw:
                         logger.warning(f"[offline-pay] 商家转账未成功（已分账） order={order_no}: {tw}")

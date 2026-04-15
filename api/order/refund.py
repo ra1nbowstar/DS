@@ -156,6 +156,24 @@ class RefundManager:
                     # ========== 正常订单（非零元）逻辑 ==========
                     transaction_id = order_info.get('transaction_id')
                     if not transaction_id:
+                        # 线下单：微信回调写在 offline_order，历史版本 on_paid 未同步到 orders
+                        cur.execute(
+                            "SELECT transaction_id FROM offline_order WHERE order_no=%s LIMIT 1",
+                            (order_number,),
+                        )
+                        off = cur.fetchone()
+                        if off and off.get("transaction_id"):
+                            transaction_id = off["transaction_id"]
+                            cur.execute(
+                                """UPDATE orders SET transaction_id=%s
+                                   WHERE order_number=%s
+                                   AND (transaction_id IS NULL OR transaction_id='')""",
+                                (transaction_id, order_number),
+                            )
+                            logger.info(
+                                f"【退款审核】已从 offline_order 补全微信交易号并回写 orders: {order_number}"
+                            )
+                    if not transaction_id:
                         logger.error(f"【退款审核】订单无微信交易号，无法退款。订单状态: {order_info.get('status')}")
                         raise HTTPException(status_code=400, detail="订单未支付或缺少微信交易号，无法退款")
 

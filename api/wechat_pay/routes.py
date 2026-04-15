@@ -783,7 +783,8 @@ async def _handle_offline_pay_success(order_no: str, transaction_id: str, amount
                 tw = await OfflineService.on_paid(
                     order_no=order_no,
                     amount=Decimal(db_total) / 100,
-                    coupon_discount=Decimal(order["amount"] - db_total) / 100 if offline_cids else Decimal(0)
+                    coupon_discount=Decimal(order["amount"] - db_total) / 100 if offline_cids else Decimal(0),
+                    transaction_id=transaction_id,
                 )
                 if tw:
                     logger.warning(f"[offline-pay] 商家转账未成功（已分账） order={order_no}: {tw}")

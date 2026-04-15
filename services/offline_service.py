@@ -578,7 +578,12 @@ class OfflineService:
                 return cur.fetchone()
 
     @staticmethod
-    async def on_paid(order_no: str, amount: Decimal, coupon_discount: Decimal = Decimal(0)) -> Optional[str]:
+    async def on_paid(
+        order_no: str,
+        amount: Decimal,
+        coupon_discount: Decimal = Decimal(0),
+        transaction_id: Optional[str] = None,
+    ) -> Optional[str]:
         """
         线下订单支付成功后的处理：
         - 资金分账（所有子池基于实付+优惠券分配）
@@ -603,14 +608,16 @@ class OfflineService:
 
                 merchant_id = order["merchant_id"]
                 user_id = order["user_id"]
+                wx_tid = (transaction_id or "").strip() or None
 
-                # 1. 插入平台订单表（用于对账）
+                # 1. 插入平台订单表（用于对账）；须写入微信 transaction_id，否则统一退款审核读 orders 会缺号
                 cur.execute(
                     """INSERT INTO orders (order_number, user_id, merchant_id, total_amount, status,
-                       offline_order_flag, pay_way, created_at, coupon_discount) 
-                       VALUES (%s, %s, %s, %s, 'completed', 1, 'wechat', NOW(), %s)""",
-                    (order_no, user_id, merchant_id, amount, coupon_discount)
+                       offline_order_flag, pay_way, created_at, coupon_discount, transaction_id) 
+                       VALUES (%s, %s, %s, %s, 'completed', 1, 'wechat', NOW(), %s, %s)""",
+                    (order_no, user_id, merchant_id, amount, coupon_discount, wx_tid)
                 )
+                platform_order_id = cur.lastrowid
 
                 # 2. 资金分账
                 finance = FinanceService()
@@ -687,7 +694,13 @@ class OfflineService:
                     cur.execute(
                         """INSERT INTO points_log (user_id, change_amount, balance_after, type, reason, related_order, created_at)
                            VALUES (%s, %s, %s, 'member', %s, %s, NOW())""",
-                        (user_id, amount, new_balance, f"线下订单支付获得积分: {order_no}", None)
+                        (
+                            user_id,
+                            amount,
+                            new_balance,
+                            f"线下订单支付获得积分: {order_no}",
+                            platform_order_id,
+                        ),
                     )
 
                 # 4. 公司积分池增加（基于完整基数）

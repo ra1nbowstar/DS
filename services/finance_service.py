@@ -1817,7 +1817,7 @@ class FinanceService:
         def _internal(cur):
             # 1. 查询订单信息（锁定行）
             cur.execute("""
-                SELECT id, user_id, pending_points, pending_coupon_ids, status
+                SELECT id, user_id, pending_points, pending_coupon_ids, status, offline_order_flag
                 FROM orders
                 WHERE order_number = %s
                 FOR UPDATE
@@ -1850,13 +1850,23 @@ class FinanceService:
                 """, (user_id, pending_points, new_balance, f"订单退款退回积分: {order_number}", order_id))
                 logger.info(f"订单 {order_number} 退回积分 {pending_points} 给用户 {user_id}")
 
-            # 3. 退回使用的优惠券
-            coupon_ids = []
+            # 3. 退回使用的优惠券（线上：pending_coupon_ids；线下：券只记在 offline_order）
+            coupon_ids: list = []
             if pending_coupon_ids_json:
                 try:
-                    coupon_ids = json.loads(pending_coupon_ids_json)
+                    raw_ids = json.loads(pending_coupon_ids_json)
+                    coupon_ids = [int(x) for x in raw_ids] if isinstance(raw_ids, list) else []
                 except Exception:
                     logger.warning(f"解析 pending_coupon_ids 失败: {pending_coupon_ids_json}")
+            if order.get("offline_order_flag"):
+                cur.execute(
+                    "SELECT coupon_id, coupon_ids FROM offline_order WHERE order_no=%s LIMIT 1",
+                    (order_number,),
+                )
+                off_coupon_row = cur.fetchone()
+                if off_coupon_row:
+                    extra_ids = parse_offline_coupon_ids(off_coupon_row)
+                    coupon_ids = sorted({int(x) for x in list(coupon_ids) + extra_ids})
             if coupon_ids:
                 placeholders = ','.join(['%s'] * len(coupon_ids))
                 cur.execute(f"""
@@ -1875,15 +1885,30 @@ class FinanceService:
                 else:
                     logger.info(f"订单 {order_number} 使用的优惠券均已过期，无法退回")
 
-            # 4. 收回因该订单获得的积分（仅收回结算时自动发放的积分）
-            cur.execute("""
+            # 4. 收回因该订单获得的积分（线上发放 + 线下实付发放；历史线下行 related_order 可能为 NULL）
+            offline_grant_reason = f"线下订单支付获得积分: {order_number}"
+            cur.execute(
+                """
                 SELECT SUM(change_amount) as total_granted
                 FROM points_log
-                WHERE related_order = %s 
-                AND type = 'member' 
+                WHERE user_id = %s
+                AND type = 'member'
                 AND change_amount > 0
-                AND reason IN ('购买会员商品获得积分', '购买普通商品获得积分', '购买商品赠送积分')
-            """, (order_id,))
+                AND (
+                    (
+                        related_order = %s
+                        AND reason IN (
+                            '购买会员商品获得积分',
+                            '购买普通商品获得积分',
+                            '购买商品赠送积分',
+                            %s
+                        )
+                    )
+                    OR (related_order IS NULL AND reason = %s)
+                )
+                """,
+                (user_id, order_id, offline_grant_reason, offline_grant_reason),
+            )
             row = cur.fetchone()
             total_granted = Decimal(str(row['total_granted'] or 0))
             if total_granted > 0:
