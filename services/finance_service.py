@@ -501,6 +501,14 @@ class FinanceService:
                     "UPDATE users SET member_level = %s, level_changed_at = NOW() WHERE id = %s",
                     (new_level, user_id)
                 )
+                # 记录本单实际授予的等级（达到上限时可能小于购买数量），退款按此回退
+                cur.execute(
+                    """INSERT INTO member_level_grants
+                       (order_id,order_number,user_id,level_before,level_after,granted_level)
+                       VALUES(%s,%s,%s,%s,%s,%s)
+                       ON DUPLICATE KEY UPDATE granted_level=VALUES(granted_level)""",
+                    (order_id, order_no, user_id, old_level, new_level, max(0, new_level - old_level))
+                )
 
                 # 发放用户积分：仅按订单应付现金（与微信实付一致），不按「券面额/积分抵扣」分摊进获赠积分
                 if cash_payable > Decimal('0'):
@@ -689,18 +697,27 @@ class FinanceService:
                     total_points += Decimal(str(item.get('reward_points', 0) or 0)) * qty
 
                 if total_rain > 0:
+                    cur.execute("SELECT COALESCE(true_total_points,0) AS bal FROM users WHERE id=%s FOR UPDATE",
+                                (user_id,))
+                    rain_before = Decimal(str(cur.fetchone()['bal'] or 0))
                     cur.execute(
                         "UPDATE users SET true_total_points = true_total_points + %s WHERE id = %s",
                         (total_rain, user_id)
                     )
                     cur.execute("SELECT true_total_points FROM users WHERE id = %s", (user_id,))
                     new_true_total = cur.fetchone()['true_total_points']
+                    rain_credited = Decimal(str(new_true_total or 0)) - rain_before
                     cur.execute(
                         """INSERT INTO account_flow (account_type, related_user, change_amount, balance_after,
                            flow_type, remark, created_at)
                            VALUES (%s, %s, %s, %s, %s, %s, NOW())""",
-                        ('true_total_points', user_id, total_rain, new_true_total, 'income',
+                        ('true_total_points', user_id, rain_credited, new_true_total, 'income',
                          f"购买商品赠送雨点 - 订单#{order_no}")
+                    )
+                    cur.execute(
+                        """INSERT INTO rain_point_grants(flow_id,order_id,recipient_id,amount)
+                           VALUES(%s,%s,%s,%s)""",
+                        (cur.lastrowid, order_id, user_id, rain_credited)
                     )
 
                 if total_points > 0:
@@ -1143,6 +1160,12 @@ class FinanceService:
 
             # 发放到 team_reward_points
             cur.execute(
+                "SELECT COALESCE(team_reward_points,0) AS tp, COALESCE(true_total_points,0) AS tt "
+                "FROM users WHERE id=%s FOR UPDATE",
+                (recipient_id,)
+            )
+            team_before = cur.fetchone()
+            cur.execute(
                 "UPDATE users SET team_reward_points = COALESCE(team_reward_points, 0) + %s WHERE id = %s",
                 (reward_amount, recipient_id)
             )
@@ -1154,17 +1177,27 @@ class FinanceService:
 
             # 记录流水
             cur.execute(
-                "SELECT COALESCE(team_reward_points, 0) AS team_reward_points FROM users WHERE id = %s",
+                "SELECT COALESCE(team_reward_points, 0) AS team_reward_points, "
+                "COALESCE(true_total_points, 0) AS true_total_points FROM users WHERE id = %s",
                 (recipient_id,)
             )
-            new_balance = Decimal(str(cur.fetchone()['team_reward_points'] or 0))
+            team_after = cur.fetchone()
+            new_balance = Decimal(str(team_after['team_reward_points'] or 0))
+            team_credited = new_balance - Decimal(str(team_before['tp'] or 0))
+            if team_credited != Decimal(str(team_after['true_total_points'] or 0)) - Decimal(str(team_before['tt'] or 0)):
+                raise FinanceException('团队奖励实际入账金额不一致')
 
             cur.execute(
                 """INSERT INTO account_flow (account_type, related_user, change_amount, balance_after, 
                    flow_type, remark, created_at)
                    VALUES (%s, %s, %s, %s, %s, %s, NOW())""",
-                ('team_reward_points', recipient_id, reward_amount,
+                ('team_reward_points', recipient_id, team_credited,
                  new_balance, 'income', f"团队L{target_layer}奖励（来自第{actual_layer}层）- 订单#{order_id}")
+            )
+            cur.execute(
+                """INSERT INTO team_reward_grants(flow_id,order_id,recipient_id,layer,amount)
+                   VALUES(%s,%s,%s,%s,%s)""",
+                (cur.lastrowid, order_id, recipient_id, target_layer, team_credited)
             )
 
             total_distributed += reward_amount
@@ -1971,6 +2004,31 @@ class FinanceService:
                         VALUES(%s,%s,%s,%s,%s,'member_reward_shortfall')""",
                         (f'member-reward:{order_id}', order_number, order.get('transaction_id'),
                          int(Decimal(str(order.get('total_amount') or 0)) * 100), order.get('refund_no')))
+
+            # 5. 会员等级回退：按结算时记录的实际授予等级，避免六星上限时多扣。
+            cur.execute(
+                "SELECT granted_level FROM member_level_grants WHERE order_id=%s AND recovered_at IS NULL",
+                (order_id,),
+            )
+            level_grant = cur.fetchone()
+            if level_grant:
+                granted_level = int(level_grant['granted_level'] or 0)
+                cur.execute("SELECT member_level FROM users WHERE id=%s FOR UPDATE", (user_id,))
+                current_level = int((cur.fetchone() or {}).get('member_level') or 0)
+                target_level = max(0, current_level - granted_level)
+                if target_level != current_level:
+                    cur.execute(
+                        "UPDATE users SET member_level=%s, level_changed_at=NOW() WHERE id=%s",
+                        (target_level, user_id),
+                    )
+                    logger.info(
+                        'member_level_reverted order=%s user=%s from=%s to=%s',
+                        order_number, user_id, current_level, target_level,
+                    )
+                cur.execute(
+                    "UPDATE member_level_grants SET recovered_refund_no=%s, recovered_at=NOW() WHERE order_id=%s",
+                    (order.get('refund_no'), order_id),
+                )
             finish_event(cur, 'discount_refund', order_number)
 
         if external_cur is not None:
@@ -8285,6 +8343,118 @@ def reverse_split_on_refund(order_number: str, external_conn=None, event_key=Non
             cur.execute("INSERT INTO account_flow(account_type,change_amount,balance_after,flow_type,remark,created_at) VALUES(%s,%s,%s,%s,%s,NOW())",
                         (account, -delta, balance, 'expense' if delta > 0 else 'income', f'退款回冲: {order_number}'))
             applied[account] = str(delta)
+
+        # ===== 雨点与团队奖励回收：按 grant 记录、累计退款比例执行 =====
+        cum_ratio = ((refunded + amount) / total) if total else Decimal('1')
+
+        def _prior_sum(marker):
+            return sum(
+                (Decimal(str(r.get('accounts', {}).get(marker, '0')))
+                 for r in prior if isinstance(r, dict)),
+                Decimal('0'),
+            )
+
+        def _void_rain_coupons(user_id, shortfall):
+            """作废用户未使用券以覆盖雨点缺口，按面额精确拆分，不整张超扣。"""
+            if shortfall <= 0:
+                return Decimal('0')
+            remaining = shortfall
+            cur.execute(
+                "SELECT id, amount FROM coupons WHERE user_id=%s AND status='unused' "
+                "AND coupon_type='user' AND valid_to >= CURDATE() "
+                "ORDER BY valid_to ASC, id ASC FOR UPDATE",
+                (user_id,),
+            )
+            for coupon in cur.fetchall() or []:
+                if remaining <= 0:
+                    break
+                coupon_amount = Decimal(str(coupon['amount'] or 0))
+                if coupon_amount <= 0:
+                    continue
+                if coupon_amount <= remaining:
+                    cur.execute("UPDATE coupons SET status='expired' WHERE id=%s", (coupon['id'],))
+                    remaining -= coupon_amount
+                else:
+                    cur.execute("UPDATE coupons SET amount=%s WHERE id=%s",
+                                (coupon_amount - remaining, coupon['id']))
+                    cur.execute(
+                        "INSERT INTO coupons(user_id,coupon_type,amount,status,valid_from,valid_to,used_at) "
+                        "SELECT user_id,coupon_type,%s,'expired',valid_from,valid_to,NOW() FROM coupons WHERE id=%s",
+                        (remaining, coupon['id']),
+                    )
+                    remaining = Decimal('0')
+            return shortfall - remaining
+
+        def _claw_user_points(user_id, field, need, marker, label):
+            cur.execute(f"SELECT COALESCE({field},0) AS bal FROM users WHERE id=%s FOR UPDATE", (user_id,))
+            balance_before = Decimal(str(cur.fetchone()['bal'] or 0))
+            taken = min(need, balance_before)
+            if taken > 0:
+                balance_after = balance_before - taken
+                cur.execute(f"UPDATE users SET {field}=%s WHERE id=%s", (balance_after, user_id))
+                cur.execute(
+                    "INSERT INTO account_flow(account_type,related_user,change_amount,balance_after,flow_type,remark,created_at) "
+                    "VALUES(%s,%s,%s,%s,'expense',%s,NOW())",
+                    (field, user_id, -taken, balance_after, f'退款回冲: {order_number} {label}'),
+                )
+            if taken < need:
+                logger.warning('refund_clawback_shortfall order=%s user=%s field=%s want=%s taken=%s',
+                               order_number, user_id, field, need, taken)
+            return taken
+
+        # 购买赠送雨点
+        cur.execute(
+            "SELECT flow_id, recipient_id, amount FROM rain_point_grants "
+            "WHERE order_id=%s AND state='granted' ORDER BY flow_id FOR UPDATE",
+            (order['id'],),
+        )
+        for grant in cur.fetchall() or []:
+            grant_amount = Decimal(str(grant['amount']))
+            grant_target = (grant_amount * cum_ratio).quantize(Decimal('0.0001'))
+            marker = f'grant:rain:{grant["flow_id"]}'
+            need = grant_target - _prior_sum(marker)
+            if need <= 0:
+                continue
+            taken = _claw_user_points(grant['recipient_id'], 'true_total_points', need, marker, '雨点')
+            shortfall = need - taken
+            if shortfall > 0:
+                voided = _void_rain_coupons(grant['recipient_id'], shortfall)
+                if voided > 0:
+                    cur.execute(
+                        "INSERT INTO account_flow(account_type,related_user,change_amount,balance_after,flow_type,remark,created_at) "
+                        "VALUES('coupon',%s,%s,NULL,'expense',%s,NOW())",
+                        (grant['recipient_id'], -voided,
+                         f'退款回冲作废优惠券: {order_number} 原流水#{grant["flow_id"]}'),
+                    )
+            applied[marker] = str(need)
+            if grant_target >= grant_amount:
+                cur.execute(
+                    "UPDATE rain_point_grants SET state='recovered',recovered_refund_no=%s,recovered_at=NOW() "
+                    "WHERE flow_id=%s", (key, grant['flow_id']),
+                )
+
+        # 团队奖励
+        cur.execute(
+            "SELECT flow_id, recipient_id, amount FROM team_reward_grants "
+            "WHERE order_id=%s AND state='granted' ORDER BY flow_id FOR UPDATE",
+            (order['id'],),
+        )
+        for grant in cur.fetchall() or []:
+            grant_amount = Decimal(str(grant['amount']))
+            grant_target = (grant_amount * cum_ratio).quantize(Decimal('0.0001'))
+            marker = f'grant:team:{grant["flow_id"]}'
+            need = grant_target - _prior_sum(marker)
+            if need <= 0:
+                continue
+            _claw_user_points(grant['recipient_id'], 'team_reward_points', need, marker, '团队奖励')
+            _claw_user_points(grant['recipient_id'], 'true_total_points', need, marker, '团队奖励')
+            applied[marker] = str(need)
+            if grant_target >= grant_amount:
+                cur.execute(
+                    "UPDATE team_reward_grants SET state='recovered',recovered_refund_no=%s,recovered_at=NOW() "
+                    "WHERE flow_id=%s", (key, grant['flow_id']),
+                )
+
         cur.execute("UPDATE finance_events SET result_json=%s WHERE event_kind='refund_split' AND event_key=%s",
                     (json.dumps({'amount': str(amount), 'accounts': applied}), key))
     if external_conn is not None:
